@@ -130,7 +130,6 @@ function normalizeTripPayload(raw, fallbackDriverId) {
 
 function emitTripAssigned(trip) {
   io.emit("trip:assigned", trip);
-  io.to(trip.driverId).emit("trip:assigned", trip);
 }
 
 function updateDriverFromTrip(trip) {
