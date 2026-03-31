@@ -1,5 +1,6 @@
 const express = require("express");
 const http = require("http");
+const { RtcRole, RtcTokenBuilder } = require("agora-token");
 const { Server } = require("socket.io");
 
 const app = express();
@@ -14,6 +15,17 @@ const trips = new Map(); // key: tripId
 
 let channelBusy = false;
 let channelOwnerId = null;
+let channelLockedAt = 0;
+const CHANNEL_BUSY_TTL_MS = 8000;
+const AGORA_APP_ID = asString(
+  process.env.AGORA_APP_ID,
+  "f33bdf0e58e242fd808fe52b6157a22d",
+);
+const AGORA_APP_CERTIFICATE = asString(process.env.AGORA_APP_CERTIFICATE);
+const AGORA_TOKEN_TTL_SECONDS = Math.max(
+  120,
+  asNumber(process.env.AGORA_TOKEN_TTL_SECONDS, 3600),
+);
 
 function nowIso() {
   return new Date().toISOString();
@@ -30,7 +42,10 @@ function asNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeLocation(raw, fallback = { latitude: 19.4326, longitude: -99.1332 }) {
+function normalizeLocation(
+  raw,
+  fallback = { latitude: 0, longitude: 0 },
+) {
   if (!raw || typeof raw !== "object") return fallback;
   const latitude = asNumber(raw.latitude, fallback.latitude);
   const longitude = asNumber(raw.longitude, fallback.longitude);
@@ -39,6 +54,34 @@ function normalizeLocation(raw, fallback = { latitude: 19.4326, longitude: -99.1
     longitude,
     speed: asNumber(raw.speed, 0),
     timestamp: raw.timestamp ? String(raw.timestamp) : null,
+  };
+}
+
+function hasAgoraTokenConfig() {
+  return Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE);
+}
+
+function normalizeAgoraRole(value) {
+  return asString(value, "publisher").toLowerCase() === "subscriber"
+    ? RtcRole.SUBSCRIBER
+    : RtcRole.PUBLISHER;
+}
+
+function buildAgoraRtcToken({ channelId, uid, role }) {
+  const privilegeExpiredTs =
+    Math.floor(Date.now() / 1000) + AGORA_TOKEN_TTL_SECONDS;
+  const token = RtcTokenBuilder.buildTokenWithUid(
+    AGORA_APP_ID,
+    AGORA_APP_CERTIFICATE,
+    channelId,
+    uid,
+    role,
+    privilegeExpiredTs,
+  );
+  return {
+    token,
+    expiresAt: privilegeExpiredTs,
+    ttlSeconds: AGORA_TOKEN_TTL_SECONDS,
   };
 }
 
@@ -57,6 +100,7 @@ function toDriverStatusFromTripStatus(status, fallback = "Disponible") {
 function ensureDriverRecord(socketId, name = "Driver") {
   const existing = drivers.get(socketId);
   if (existing) return existing;
+
   const next = {
     id: socketId,
     name,
@@ -64,7 +108,7 @@ function ensureDriverRecord(socketId, name = "Driver") {
     isOnline: true,
     status: "Disponible",
     currentTripId: null,
-    location: { latitude: 19.4326, longitude: -99.1332, speed: 0, timestamp: null },
+    location: { latitude: 0, longitude: 0, speed: 0, timestamp: null },
     updatedAt: nowIso(),
   };
   drivers.set(socketId, next);
@@ -79,7 +123,7 @@ function registerClient(socket, data) {
   socket.data.name = name;
   socket.data.userId = socket.id;
 
-  console.log(`📥 Registro: ${role} - ${name} (${socket.id})`);
+  console.log(`register: ${role} - ${name} (${socket.id})`);
 
   if (role === "admin") {
     admins.add(socket.id);
@@ -104,32 +148,45 @@ function registerClient(socket, data) {
 }
 
 function normalizeTripPayload(raw, fallbackDriverId) {
-  const id = asString(raw?.id, `${Date.now()}`);
-  const driverId = asString(raw?.driverId || raw?.toDriverId || raw?.targetId, fallbackDriverId || "");
+  const sourceTrip =
+    raw && typeof raw.trip === "object" && !Array.isArray(raw.trip)
+      ? raw.trip
+      : null;
+  const base = sourceTrip || raw || {};
+  const id = asString(base.id || raw?.tripId, `${Date.now()}`);
+  const driverId = asString(
+    base.driverId || base.toDriverId || base.targetId || fallbackDriverId,
+    "",
+  );
   if (!driverId) return null;
 
   const existing = trips.get(id);
   const merged = {
     id,
     driverId,
-    origin: asString(raw?.origin, existing?.origin || "Origen"),
-    destination: asString(raw?.destination, existing?.destination || "Destino"),
-    status: asString(raw?.status, existing?.status || "assigned"),
-    createdAt: asString(raw?.createdAt, existing?.createdAt || nowIso()),
-    distanceMiles: asNumber(raw?.distanceMiles, existing?.distanceMiles || 0),
-    durationMinutes: asNumber(raw?.durationMinutes, existing?.durationMinutes || 0),
-    fareUsd: asNumber(raw?.fareUsd, existing?.fareUsd || 0),
-    routePoints: Array.isArray(raw?.routePoints) ? raw.routePoints : existing?.routePoints || [],
-    originLocation: raw?.originLocation || existing?.originLocation || null,
-    destinationLocation: raw?.destinationLocation || existing?.destinationLocation || null,
+    origin: asString(base.origin, existing?.origin || "Origen"),
+    destination: asString(base.destination, existing?.destination || "Destino"),
+    status: asString(base.status, existing?.status || "assigned"),
+    createdAt: asString(base.createdAt, existing?.createdAt || nowIso()),
+    distanceMiles: asNumber(base.distanceMiles, existing?.distanceMiles || 0),
+    durationMinutes: asNumber(base.durationMinutes, existing?.durationMinutes || 0),
+    fareUsd: asNumber(base.fareUsd, existing?.fareUsd || 0),
+    routePoints: Array.isArray(base.routePoints)
+      ? base.routePoints
+      : existing?.routePoints || [],
+    originLocation: base.originLocation || existing?.originLocation || null,
+    destinationLocation:
+      base.destinationLocation || existing?.destinationLocation || null,
     updatedAt: nowIso(),
   };
+
   trips.set(id, merged);
   return merged;
 }
 
 function emitTripAssigned(trip) {
-  io.emit("trip:assigned", trip);
+  io.to(trip.driverId).emit("trip:assigned", trip);
+  admins.forEach((adminId) => io.to(adminId).emit("trip:assigned", trip));
 }
 
 function updateDriverFromTrip(trip) {
@@ -148,18 +205,23 @@ function updateDriverFromTrip(trip) {
 function handleTripAssignment(raw) {
   const trip = normalizeTripPayload(raw);
   if (!trip) return;
+
   trip.status = "assigned";
+  trip.updatedAt = nowIso();
   trips.set(trip.id, trip);
+
   updateDriverFromTrip(trip);
   emitTripAssigned(trip);
+  io.emit("trip:update", trip);
 }
 
-function handleTripDecision(socket, raw, status) {
-  const tripId = asString(raw?.tripId);
+function handleTripDecision(raw, status) {
+  const tripId = asString(raw?.tripId || raw?.id);
   if (!tripId) return;
 
   const existing = trips.get(tripId);
   if (!existing) return;
+
   const next = {
     ...existing,
     status,
@@ -190,10 +252,17 @@ function handleTripDecision(socket, raw, status) {
 }
 
 function buildVoicePayload(socket, raw) {
-  const channel = asString(raw?.channel, raw?.private || raw?.channelNumber === 2 ? "private" : "global");
+  const channel = asString(
+    raw?.channel,
+    raw?.private || raw?.channelNumber === 2 ? "private" : "global",
+  );
   const fromId = asString(raw?.fromId || raw?.senderId, socket.id);
-  const fromName = asString(raw?.fromName || raw?.senderName, socket.data.name || "Usuario");
+  const fromName = asString(
+    raw?.fromName || raw?.senderName,
+    socket.data.name || "Usuario",
+  );
   const target = asString(raw?.toDriverId || raw?.targetId);
+
   return {
     channel,
     private: channel === "private",
@@ -205,29 +274,61 @@ function buildVoicePayload(socket, raw) {
     senderRole: asString(raw?.senderRole, socket.data.role || "driver"),
     toDriverId: target || null,
     targetId: target || null,
+    sourceSocketId: socket.id,
     clientSessionId: asString(raw?.clientSessionId, null),
   };
 }
 
+function isVoiceLockStale() {
+  if (!channelBusy || !channelLockedAt) return false;
+  return Date.now() - channelLockedAt >= CHANNEL_BUSY_TTL_MS;
+}
+
+function releaseVoice(socket, raw, options = {}) {
+  const force = options.force === true;
+  const callerId = socket?.id || null;
+
+  if (!force && channelBusy && channelOwnerId && callerId !== channelOwnerId) {
+    if (!isVoiceLockStale()) {
+      return;
+    }
+  }
+
+  channelBusy = false;
+  channelOwnerId = null;
+  channelLockedAt = 0;
+
+  const payload = raw && typeof raw === "object" ? raw : {};
+  io.emit("voice:stop", payload);
+  io.emit("voice:end", payload);
+  console.log("voice:stop");
+}
+
 function routeVoiceStart(socket, raw) {
   const payload = buildVoicePayload(socket, raw);
-  const requesterId = payload.fromId || socket.id;
+  const requesterId = socket.id;
 
   if (channelBusy && channelOwnerId && channelOwnerId !== requesterId) {
-    console.log("⚠️ Canal ocupado, ignorando voice:start");
-    return;
+    if (isVoiceLockStale()) {
+      releaseVoice(socket, { reason: "stale-lock-cleared" }, { force: true });
+    } else {
+      console.log("channel busy, ignoring voice:start");
+      return;
+    }
   }
 
   channelBusy = true;
   channelOwnerId = requesterId;
-  console.log(`🎙️ voice:start -> ${payload.channel} desde ${payload.fromName}`);
+  channelLockedAt = Date.now();
+  console.log(`voice:start -> ${payload.channel} from ${payload.fromName}`);
 
   if (payload.channel === "private") {
     if (payload.toDriverId) {
-      io.to(payload.toDriverId).emit("voice:start", payload);
-    }
-    if (payload.targetId === "admin") {
-      admins.forEach((adminId) => io.to(adminId).emit("voice:start", payload));
+      if (payload.toDriverId.toLowerCase() === "admin") {
+        admins.forEach((adminId) => io.to(adminId).emit("voice:start", payload));
+      } else {
+        io.to(payload.toDriverId).emit("voice:start", payload);
+      }
     }
     io.to(socket.id).emit("voice:start", payload);
     return;
@@ -237,17 +338,23 @@ function routeVoiceStart(socket, raw) {
 }
 
 function routeVoiceChunk(socket, raw) {
-  const mapPayload = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
-  const channel = asString(mapPayload?.channel, mapPayload?.private || mapPayload?.channelNumber === 2 ? "private" : "global");
+  const mapPayload =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  const channel = asString(
+    mapPayload?.channel,
+    mapPayload?.private || mapPayload?.channelNumber === 2 ? "private" : "global",
+  );
   const target = asString(mapPayload?.toDriverId || mapPayload?.targetId);
-  const fromId = asString(mapPayload?.fromId || mapPayload?.senderId, socket.id);
 
-  if (channelOwnerId && channelOwnerId !== fromId) return;
+  if (channelBusy && channelOwnerId && channelOwnerId !== socket.id) {
+    return;
+  }
 
   if (channel === "private" && target) {
-    io.to(target).emit("voice:chunk", raw);
-    if (target === "admin") {
+    if (target.toLowerCase() === "admin") {
       admins.forEach((adminId) => io.to(adminId).emit("voice:chunk", raw));
+    } else {
+      io.to(target).emit("voice:chunk", raw);
     }
     return;
   }
@@ -255,16 +362,77 @@ function routeVoiceChunk(socket, raw) {
   io.emit("voice:chunk", raw);
 }
 
-function releaseVoice(raw) {
-  channelBusy = false;
-  channelOwnerId = null;
-  io.emit("voice:stop", raw || null);
-  io.emit("voice:end", raw || null);
-  console.log("🛑 voice:stop");
+function buildChatPayload(socket, raw) {
+  const senderRole = asString(raw?.senderRole, socket.data.role || "driver");
+  const senderId = asString(
+    raw?.senderId,
+    senderRole === "admin" ? "admin" : socket.id,
+  );
+  const senderName = asString(raw?.senderName, socket.data.name || "Usuario");
+  const chatScope = asString(raw?.chatScope, "private").toLowerCase();
+  const groupConversation = "fleet::global";
+  if (chatScope === "global" || asString(raw?.conversationId) === groupConversation) {
+    return {
+      id: asString(raw?.id, `${Date.now()}`),
+      conversationId: groupConversation,
+      senderId,
+      senderName,
+      senderRole,
+      targetId: "all",
+      driverId: asString(raw?.driverId, senderRole === "driver" ? socket.id : ""),
+      text: asString(raw?.text),
+      imageBase64: asString(raw?.imageBase64, null),
+      imageMimeType: asString(raw?.imageMimeType, null),
+      createdAt: asString(raw?.createdAt, nowIso()),
+      chatScope: "global",
+    };
+  }
+
+  const targetId = asString(raw?.targetId || raw?.toDriverId);
+  const driverId = asString(
+    raw?.driverId,
+    senderRole === "admin" ? targetId : socket.id,
+  );
+
+  if (!driverId) return null;
+  if (senderRole === "admin" && !targetId) return null;
+
+  return {
+    id: asString(raw?.id, `${Date.now()}`),
+    conversationId: asString(raw?.conversationId, `admin::${driverId}`),
+    senderId,
+    senderName,
+    senderRole,
+    targetId: senderRole === "admin" ? targetId : "admin",
+    driverId,
+    text: asString(raw?.text),
+    imageBase64: asString(raw?.imageBase64, null),
+    imageMimeType: asString(raw?.imageMimeType, null),
+    createdAt: asString(raw?.createdAt, nowIso()),
+  };
+}
+
+function routeChatMessage(socket, raw) {
+  const payload = buildChatPayload(socket, raw);
+  if (!payload) return;
+
+  if (payload.conversationId === "fleet::global") {
+    io.emit("chat:message", payload);
+    return;
+  }
+
+  if (payload.senderRole === "admin") {
+    io.to(payload.targetId).emit("chat:message", payload);
+    admins.forEach((adminId) => io.to(adminId).emit("chat:message", payload));
+    return;
+  }
+
+  admins.forEach((adminId) => io.to(adminId).emit("chat:message", payload));
+  io.to(socket.id).emit("chat:message", payload);
 }
 
 io.on("connection", (socket) => {
-  console.log(`🔌 Cliente conectado: ${socket.id}`);
+  console.log(`client connected: ${socket.id}`);
 
   socket.on("register", (data) => registerClient(socket, data || {}));
 
@@ -284,13 +452,16 @@ io.on("connection", (socket) => {
     socket.emit("drivers:list", Array.from(drivers.values()));
   });
 
-  // Backward compatibility with old client.
+  // Backward compatibility with older clients.
   socket.on("drivers:list", () => {
     socket.emit("drivers:list", Array.from(drivers.values()));
   });
 
   socket.on("driver:location:update", (data) => {
-    const driverId = asString(data?.driverId, socket.id);
+    const fromDriverSocket = socket.data.role === "driver";
+    const driverId = fromDriverSocket
+      ? socket.id
+      : asString(data?.driverId, socket.id);
     const name = asString(data?.name, socket.data.name || "Driver");
     const status = asString(data?.status, "Disponible");
     const base = ensureDriverRecord(driverId, name);
@@ -304,6 +475,7 @@ io.on("connection", (socket) => {
       location: normalizeLocation(data),
       updatedAt: nowIso(),
     };
+
     drivers.set(driverId, next);
     io.emit("driver:location:update", {
       driverId: next.id,
@@ -320,19 +492,22 @@ io.on("connection", (socket) => {
 
   socket.on("assign:trip", (data) => handleTripAssignment(data || {}));
   socket.on("trip:assigned", (data) => handleTripAssignment(data || {}));
-  socket.on("trip:accepted", (data) => handleTripDecision(socket, data || {}, "accepted"));
-  socket.on("trip:rejected", (data) => handleTripDecision(socket, data || {}, "rejected"));
+  socket.on("trip:accepted", (data) => handleTripDecision(data || {}, "accepted"));
+  socket.on("trip:rejected", (data) => handleTripDecision(data || {}, "rejected"));
+  socket.on("chat:send", (data) => routeChatMessage(socket, data || {}));
 
   socket.on("voice:start", (data) => routeVoiceStart(socket, data || {}));
   socket.on("voice:chunk", (data) => routeVoiceChunk(socket, data));
-  socket.on("voice:stop", (data) => releaseVoice(data || {}));
-  socket.on("voice:end", (data) => releaseVoice(data || {}));
+  socket.on("voice:stop", (data) => releaseVoice(socket, data || {}));
+  socket.on("voice:end", (data) => releaseVoice(socket, data || {}));
 
   socket.on("disconnect", () => {
-    console.log(`❌ Cliente desconectado: ${socket.id}`);
+    console.log(`client disconnected: ${socket.id}`);
+
     if (channelOwnerId === socket.id) {
-      releaseVoice({ fromId: socket.id, reason: "disconnect" });
+      releaseVoice(socket, { fromId: socket.id, reason: "disconnect" }, { force: true });
     }
+
     admins.delete(socket.id);
     if (drivers.has(socket.id)) {
       drivers.delete(socket.id);
@@ -345,7 +520,58 @@ app.get("/", (_, res) => {
   res.status(200).send("AtoB server online");
 });
 
+app.get("/agora/rtc-token", (req, res) => {
+  const channelId = asString(req.query.channelId || req.query.channel);
+  const uid = Math.trunc(asNumber(req.query.uid, NaN));
+  const role = normalizeAgoraRole(req.query.role);
+
+  if (!channelId) {
+    res.status(400).json({
+      ok: false,
+      message: "channelId es obligatorio",
+    });
+    return;
+  }
+
+  if (!Number.isInteger(uid) || uid <= 0) {
+    res.status(400).json({
+      ok: false,
+      message: "uid invalido",
+    });
+    return;
+  }
+
+  if (!hasAgoraTokenConfig()) {
+    res.status(503).json({
+      ok: false,
+      message:
+        "Agora seguro activo sin AGORA_APP_CERTIFICATE en servidor. Configura AGORA_APP_ID y AGORA_APP_CERTIFICATE en Render para emitir tokens dinamicos.",
+      secure: true,
+      appIdConfigured: Boolean(AGORA_APP_ID),
+      certificateConfigured: Boolean(AGORA_APP_CERTIFICATE),
+    });
+    return;
+  }
+
+  try {
+    const result = buildAgoraRtcToken({ channelId, uid, role });
+    res.status(200).json({
+      ok: true,
+      appId: AGORA_APP_ID,
+      channelId,
+      uid,
+      secure: true,
+      ...result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: `No se pudo generar token Agora: ${error.message || error}`,
+    });
+  }
+});
+
 const port = Number(process.env.PORT || 3000);
 server.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Servidor AtoB escuchando en puerto ${port}`);
+  console.log(`AtoB server listening on ${port}`);
 });
