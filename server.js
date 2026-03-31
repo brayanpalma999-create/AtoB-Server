@@ -1,5 +1,7 @@
 const express = require("express");
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { RtcRole, RtcTokenBuilder } = require("agora-token");
 const { AccessToken } = require("livekit-server-sdk");
 const { Server } = require("socket.io");
@@ -13,6 +15,10 @@ const io = new Server(server, {
 const drivers = new Map(); // key: socketId
 const admins = new Set(); // socketIds
 const trips = new Map(); // key: tripId
+const ACCESS_STORE_PATH = path.join(__dirname, "driver_access_store.json");
+const ACCOUNT_STORE_PATH = path.join(__dirname, "account_profile_store.json");
+const driverAccessProfiles = new Map(); // key: id
+const accountProfiles = new Map(); // key: accountKey
 
 let channelBusy = false;
 let channelOwnerId = null;
@@ -35,6 +41,18 @@ const LIVEKIT_ROOM_NAME = asString(
   "atob-intercom",
 );
 const LIVEKIT_TOKEN_TTL = asString(process.env.LIVEKIT_TOKEN_TTL, "12h");
+
+app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -64,6 +82,121 @@ function normalizeLocation(
     speed: asNumber(raw.speed, 0),
     timestamp: raw.timestamp ? String(raw.timestamp) : null,
   };
+}
+
+function normalizeEmail(value) {
+  return asString(value).toLowerCase();
+}
+
+function sanitizeDriverAccess(profile) {
+  return {
+    id: asString(profile.id),
+    displayName: asString(profile.displayName),
+    email: normalizeEmail(profile.email),
+    accessCode: asString(profile.accessCode),
+    phoneNumber: asString(profile.phoneNumber, null),
+    governmentId: asString(profile.governmentId, null),
+    isActive: profile.isActive !== false,
+    createdAt: asString(profile.createdAt, nowIso()),
+  };
+}
+
+function listDriverAccessProfiles() {
+  return Array.from(driverAccessProfiles.values())
+    .map((profile) => sanitizeDriverAccess(profile))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+function loadDriverAccessProfiles() {
+  try {
+    if (!fs.existsSync(ACCESS_STORE_PATH)) return;
+    const raw = fs.readFileSync(ACCESS_STORE_PATH, "utf8");
+    if (!raw.trim()) return;
+    const decoded = JSON.parse(raw);
+    if (!Array.isArray(decoded)) return;
+    driverAccessProfiles.clear();
+    decoded.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const profile = sanitizeDriverAccess(item);
+      if (!profile.id || !profile.email) return;
+      driverAccessProfiles.set(profile.id, profile);
+    });
+  } catch (error) {
+    console.log(`access-store load failed: ${error.message || error}`);
+  }
+}
+
+function persistDriverAccessProfiles() {
+  try {
+    fs.writeFileSync(
+      ACCESS_STORE_PATH,
+      JSON.stringify(listDriverAccessProfiles(), null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.log(`access-store save failed: ${error.message || error}`);
+  }
+}
+
+function sanitizeUserProfile(raw, fallbackRole = "driver") {
+  const user = raw && typeof raw === "object" ? raw : {};
+  return {
+    id: asString(user.id),
+    name: asString(user.name),
+    role: asString(user.role, fallbackRole),
+    legalName: asString(user.legalName, user.name),
+    email: normalizeEmail(user.email),
+    phoneNumber: asString(user.phoneNumber),
+    address: asString(user.address),
+    governmentId: asString(user.governmentId),
+    languageCode: asString(user.languageCode, "es"),
+    mapThemeMode: asString(user.mapThemeMode, "flow"),
+    isOnline: user.isOnline !== false,
+    avatarPath: asString(user.avatarPath, ""),
+  };
+}
+
+function sanitizeAccountProfile(record) {
+  const fallbackRole = asString(record?.role, "driver");
+  return {
+    accountKey: asString(record?.accountKey),
+    role: fallbackRole,
+    password: asString(record?.password),
+    passwordUpdatedAt: asString(record?.passwordUpdatedAt, nowIso()),
+    savedAt: asString(record?.savedAt, nowIso()),
+    user: sanitizeUserProfile(record?.user, fallbackRole),
+  };
+}
+
+function loadAccountProfiles() {
+  try {
+    if (!fs.existsSync(ACCOUNT_STORE_PATH)) return;
+    const raw = fs.readFileSync(ACCOUNT_STORE_PATH, "utf8");
+    if (!raw.trim()) return;
+    const decoded = JSON.parse(raw);
+    if (!Array.isArray(decoded)) return;
+    accountProfiles.clear();
+    decoded.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const profile = sanitizeAccountProfile(item);
+      if (!profile.accountKey) return;
+      accountProfiles.set(profile.accountKey, profile);
+    });
+  } catch (error) {
+    console.log(`account-store load failed: ${error.message || error}`);
+  }
+}
+
+function persistAccountProfiles() {
+  try {
+    fs.writeFileSync(
+      ACCOUNT_STORE_PATH,
+      JSON.stringify(Array.from(accountProfiles.values()), null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.log(`account-store save failed: ${error.message || error}`);
+  }
 }
 
 function hasAgoraTokenConfig() {
@@ -539,6 +672,9 @@ function routeChatMessage(socket, raw) {
   io.to(socket.id).emit("chat:message", payload);
 }
 
+loadDriverAccessProfiles();
+loadAccountProfiles();
+
 io.on("connection", (socket) => {
   console.log(`client connected: ${socket.id}`);
 
@@ -627,6 +763,195 @@ io.on("connection", (socket) => {
 
 app.get("/", (_, res) => {
   res.status(200).send("AtoB server online");
+});
+
+app.get("/access/drivers", (_, res) => {
+  res.status(200).json({
+    ok: true,
+    drivers: listDriverAccessProfiles(),
+  });
+});
+
+app.post("/access/drivers/upsert", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const id = asString(payload.id, `${Date.now()}`);
+  const email = normalizeEmail(payload.email);
+  const displayName = asString(payload.displayName);
+  const accessCode = asString(payload.accessCode);
+  if (!displayName || !email || !accessCode) {
+    res.status(400).json({
+      ok: false,
+      message: "displayName, email y accessCode son obligatorios",
+    });
+    return;
+  }
+
+  let existingId = null;
+  for (const [profileId, profile] of driverAccessProfiles.entries()) {
+    if (profileId === id || normalizeEmail(profile.email) === email) {
+      existingId = profileId;
+      break;
+    }
+  }
+
+  const current = existingId ? driverAccessProfiles.get(existingId) : null;
+  const next = sanitizeDriverAccess({
+    id: existingId || id,
+    displayName,
+    email,
+    accessCode,
+    phoneNumber: asString(payload.phoneNumber, current?.phoneNumber || null),
+    governmentId: asString(payload.governmentId, current?.governmentId || null),
+    isActive: payload.isActive === false ? false : current?.isActive !== false,
+    createdAt: current?.createdAt || nowIso(),
+  });
+  driverAccessProfiles.set(next.id, next);
+  persistDriverAccessProfiles();
+  const accountKey = `driver:${email}`;
+  const currentAccount = accountProfiles.get(accountKey);
+  const nextAccount = sanitizeAccountProfile({
+    accountKey,
+    role: "driver",
+    password: accessCode,
+    passwordUpdatedAt: nowIso(),
+    savedAt: nowIso(),
+    user: {
+      ...(currentAccount?.user || {}),
+      id: currentAccount?.user?.id || next.id,
+      name: currentAccount?.user?.name || displayName,
+      legalName: displayName,
+      role: "driver",
+      email,
+      phoneNumber: asString(payload.phoneNumber, currentAccount?.user?.phoneNumber || ""),
+      address: asString(currentAccount?.user?.address),
+      governmentId: asString(payload.governmentId, currentAccount?.user?.governmentId || ""),
+      languageCode: asString(currentAccount?.user?.languageCode, "es"),
+      mapThemeMode: asString(currentAccount?.user?.mapThemeMode, "flow"),
+      avatarPath: asString(currentAccount?.user?.avatarPath, ""),
+      isOnline: currentAccount?.user?.isOnline !== false,
+    },
+  });
+  accountProfiles.set(accountKey, nextAccount);
+  persistAccountProfiles();
+  res.status(200).json({
+    ok: true,
+    profile: next,
+    drivers: listDriverAccessProfiles(),
+  });
+});
+
+app.post("/access/drivers/toggle", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const id = asString(payload.id);
+  if (!id || !driverAccessProfiles.has(id)) {
+    res.status(404).json({ ok: false, message: "Acceso no encontrado" });
+    return;
+  }
+  const current = driverAccessProfiles.get(id);
+  const next = sanitizeDriverAccess({
+    ...current,
+    isActive: payload.isActive !== false,
+  });
+  driverAccessProfiles.set(id, next);
+  persistDriverAccessProfiles();
+  res.status(200).json({ ok: true, profile: next, drivers: listDriverAccessProfiles() });
+});
+
+app.post("/access/drivers/remove", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const id = asString(payload.id);
+  if (!id) {
+    res.status(400).json({ ok: false, message: "id es obligatorio" });
+    return;
+  }
+  driverAccessProfiles.delete(id);
+  persistDriverAccessProfiles();
+  res.status(200).json({ ok: true, drivers: listDriverAccessProfiles() });
+});
+
+app.post("/access/drivers/auth", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const email = normalizeEmail(payload.email);
+  const accessCode = asString(payload.accessCode);
+  if (!email || !accessCode) {
+    res.status(400).json({
+      ok: false,
+      message: "email y accessCode son obligatorios",
+    });
+    return;
+  }
+  const match = listDriverAccessProfiles().find(
+    (profile) =>
+      profile.isActive &&
+      normalizeEmail(profile.email) === email &&
+      profile.accessCode === accessCode,
+  );
+  if (!match) {
+    res.status(401).json({
+      ok: false,
+      message: "Acceso invalido",
+    });
+    return;
+  }
+  res.status(200).json({ ok: true, profile: match });
+});
+
+app.get("/accounts/profile", (req, res) => {
+  const accountKey = asString(req.query.accountKey);
+  if (!accountKey) {
+    res.status(400).json({
+      ok: false,
+      message: "accountKey es obligatorio",
+    });
+    return;
+  }
+  const profile = accountProfiles.get(accountKey);
+  if (!profile) {
+    res.status(404).json({
+      ok: false,
+      message: "Perfil no encontrado",
+    });
+    return;
+  }
+  res.status(200).json({ ok: true, profile });
+});
+
+app.post("/accounts/profile/upsert", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const accountKey = asString(payload.accountKey);
+  const incomingUser =
+    payload.user && typeof payload.user === "object" ? payload.user : {};
+  const role = asString(payload.role, incomingUser.role || "driver");
+
+  if (!accountKey) {
+    res.status(400).json({
+      ok: false,
+      message: "accountKey es obligatorio",
+    });
+    return;
+  }
+
+  const current = accountProfiles.get(accountKey);
+  const next = sanitizeAccountProfile({
+    accountKey,
+    role,
+    password: asString(payload.password, current?.password || ""),
+    passwordUpdatedAt: asString(
+      payload.passwordUpdatedAt,
+      current?.passwordUpdatedAt || nowIso(),
+    ),
+    savedAt: nowIso(),
+    user: {
+      ...(current?.user || {}),
+      ...incomingUser,
+      role,
+      email: normalizeEmail(incomingUser.email || current?.user?.email),
+    },
+  });
+
+  accountProfiles.set(accountKey, next);
+  persistAccountProfiles();
+  res.status(200).json({ ok: true, profile: next });
 });
 
 app.get("/agora/rtc-token", (req, res) => {
