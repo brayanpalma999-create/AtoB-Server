@@ -135,6 +135,32 @@ function resolveIntercomId(data, fallback = "") {
   );
 }
 
+function resolveDriverSocketIds(driverId, driverIntercomId = "") {
+  const targetId = asString(driverId);
+  const intercomId = asString(driverIntercomId);
+  const ids = new Set();
+
+  if (targetId && drivers.has(targetId)) {
+    ids.add(targetId);
+  }
+
+  for (const [socketId, driver] of drivers.entries()) {
+    if (!driver || typeof driver !== "object") continue;
+    if (targetId && (driver.id === targetId || driver.intercomId === targetId)) {
+      ids.add(socketId);
+    }
+    if (intercomId && driver.intercomId === intercomId) {
+      ids.add(socketId);
+    }
+  }
+
+  if (!ids.size && targetId) {
+    ids.add(targetId);
+  }
+
+  return Array.from(ids);
+}
+
 function toDriverStatusFromTripStatus(status, fallback = "Disponible") {
   const normalized = asString(status).toLowerCase();
   if (normalized === "assigned") return "Asignado";
@@ -206,16 +232,29 @@ function normalizeTripPayload(raw, fallbackDriverId) {
       : null;
   const base = sourceTrip || raw || {};
   const id = asString(base.id || raw?.tripId, `${Date.now()}`);
-  const driverId = asString(
+  const requestedDriverId = asString(
     base.driverId || base.toDriverId || base.targetId || fallbackDriverId,
     "",
   );
-  if (!driverId) return null;
+  const driverIntercomId = asString(
+    base.driverIntercomId ||
+      raw?.driverIntercomId ||
+      raw?.intercomId ||
+      requestedDriverId,
+    "",
+  );
+  if (!requestedDriverId && !driverIntercomId) return null;
+  const socketTargets = resolveDriverSocketIds(
+    requestedDriverId,
+    driverIntercomId,
+  );
+  const driverId = socketTargets[0] || requestedDriverId || driverIntercomId;
 
   const existing = trips.get(id);
   const merged = {
     id,
     driverId,
+    driverIntercomId,
     origin: asString(base.origin, existing?.origin || "Origen"),
     destination: asString(base.destination, existing?.destination || "Destino"),
     status: asString(base.status, existing?.status || "assigned"),
@@ -237,19 +276,31 @@ function normalizeTripPayload(raw, fallbackDriverId) {
 }
 
 function emitTripAssigned(trip) {
-  io.to(trip.driverId).emit("trip:assigned", trip);
+  const socketTargets = resolveDriverSocketIds(
+    trip.driverId,
+    trip.driverIntercomId,
+  );
+  socketTargets.forEach((socketId) => {
+    io.to(socketId).emit("trip:assigned", trip);
+  });
   admins.forEach((adminId) => io.to(adminId).emit("trip:assigned", trip));
 }
 
 function updateDriverFromTrip(trip) {
-  const record = ensureDriverRecord(trip.driverId, "Driver");
-  const nextStatus = toDriverStatusFromTripStatus(trip.status, record.status);
-  drivers.set(trip.driverId, {
-    ...record,
-    status: nextStatus,
-    currentTripId: trip.status === "rejected" ? null : trip.id,
-    isOnline: true,
-    updatedAt: nowIso(),
+  const socketTargets = resolveDriverSocketIds(
+    trip.driverId,
+    trip.driverIntercomId,
+  );
+  socketTargets.forEach((socketId) => {
+    const record = ensureDriverRecord(socketId, "Driver");
+    const nextStatus = toDriverStatusFromTripStatus(trip.status, record.status);
+    drivers.set(socketId, {
+      ...record,
+      status: nextStatus,
+      currentTripId: trip.status === "rejected" ? null : trip.id,
+      isOnline: true,
+      updatedAt: nowIso(),
+    });
   });
   emitDriversList();
 }
@@ -290,16 +341,21 @@ function handleTripDecision(raw, status) {
   io.emit("trip:update", next);
 
   if (status === "rejected") {
-    const driver = drivers.get(next.driverId);
-    if (driver) {
-      drivers.set(next.driverId, {
+    const socketTargets = resolveDriverSocketIds(
+      next.driverId,
+      next.driverIntercomId,
+    );
+    socketTargets.forEach((socketId) => {
+      const driver = drivers.get(socketId);
+      if (!driver) return;
+      drivers.set(socketId, {
         ...driver,
         currentTripId: null,
         status: "Disponible",
         updatedAt: nowIso(),
       });
-      emitDriversList();
-    }
+    });
+    emitDriversList();
   }
 }
 
