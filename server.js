@@ -128,6 +128,13 @@ function emitDriversList() {
   io.emit("drivers:list", Array.from(drivers.values()));
 }
 
+function resolveIntercomId(data, fallback = "") {
+  return asString(
+    data?.intercomId || data?.userId || data?.appUserId,
+    fallback,
+  );
+}
+
 function toDriverStatusFromTripStatus(status, fallback = "Disponible") {
   const normalized = asString(status).toLowerCase();
   if (normalized === "assigned") return "Asignado";
@@ -142,6 +149,7 @@ function ensureDriverRecord(socketId, name = "Driver") {
 
   const next = {
     id: socketId,
+    intercomId: socketId,
     name,
     role: "driver",
     isOnline: true,
@@ -157,10 +165,14 @@ function ensureDriverRecord(socketId, name = "Driver") {
 function registerClient(socket, data) {
   const role = asString(data?.role).toLowerCase();
   const name = asString(data?.name, role === "admin" ? "Admin" : "Driver");
+  const intercomId = role === "admin"
+    ? "admin"
+    : resolveIntercomId(data, socket.id);
 
   socket.data.role = role;
   socket.data.name = name;
   socket.data.userId = socket.id;
+  socket.data.intercomId = intercomId;
 
   console.log(`register: ${role} - ${name} (${socket.id})`);
 
@@ -176,6 +188,7 @@ function registerClient(socket, data) {
     const next = {
       ...existing,
       id: socket.id,
+      intercomId,
       name,
       role: "driver",
       isOnline: true,
@@ -507,6 +520,7 @@ io.on("connection", (socket) => {
     const next = {
       ...base,
       id: driverId,
+      intercomId: resolveIntercomId(data, base.intercomId || driverId),
       name,
       role: "driver",
       isOnline: true,
