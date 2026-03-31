@@ -1,6 +1,7 @@
 const express = require("express");
 const http = require("http");
 const { RtcRole, RtcTokenBuilder } = require("agora-token");
+const { AccessToken } = require("livekit-server-sdk");
 const { Server } = require("socket.io");
 
 const app = express();
@@ -26,6 +27,14 @@ const AGORA_TOKEN_TTL_SECONDS = Math.max(
   120,
   asNumber(process.env.AGORA_TOKEN_TTL_SECONDS, 3600),
 );
+const LIVEKIT_URL = asString(process.env.LIVEKIT_URL);
+const LIVEKIT_API_KEY = asString(process.env.LIVEKIT_API_KEY);
+const LIVEKIT_API_SECRET = asString(process.env.LIVEKIT_API_SECRET);
+const LIVEKIT_ROOM_NAME = asString(
+  process.env.LIVEKIT_ROOM_NAME,
+  "atob-intercom",
+);
+const LIVEKIT_TOKEN_TTL = asString(process.env.LIVEKIT_TOKEN_TTL, "12h");
 
 function nowIso() {
   return new Date().toISOString();
@@ -61,6 +70,10 @@ function hasAgoraTokenConfig() {
   return Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE);
 }
 
+function hasLiveKitConfig() {
+  return Boolean(LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET);
+}
+
 function normalizeAgoraRole(value) {
   return asString(value, "publisher").toLowerCase() === "subscriber"
     ? RtcRole.SUBSCRIBER
@@ -83,6 +96,32 @@ function buildAgoraRtcToken({ channelId, uid, role }) {
     expiresAt: privilegeExpiredTs,
     ttlSeconds: AGORA_TOKEN_TTL_SECONDS,
   };
+}
+
+async function buildLiveKitToken({ roomName, identity, name, role }) {
+  const accessToken = new AccessToken(
+    LIVEKIT_API_KEY,
+    LIVEKIT_API_SECRET,
+    {
+      identity,
+      name,
+      ttl: LIVEKIT_TOKEN_TTL,
+      metadata: JSON.stringify({
+        role,
+        identity,
+        name,
+      }),
+    },
+  );
+  accessToken.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true,
+  });
+
+  return await accessToken.toJwt();
 }
 
 function emitDriversList() {
@@ -567,6 +606,67 @@ app.get("/agora/rtc-token", (req, res) => {
     res.status(500).json({
       ok: false,
       message: `No se pudo generar token Agora: ${error.message || error}`,
+    });
+  }
+});
+
+app.get("/livekit/token", async (req, res) => {
+  const roomName = asString(req.query.roomName, LIVEKIT_ROOM_NAME);
+  const identity = asString(req.query.identity);
+  const name = asString(req.query.name, identity);
+  const role = asString(req.query.role, identity === "admin" ? "admin" : "driver");
+
+  if (!roomName) {
+    res.status(400).json({
+      ok: false,
+      message: "roomName es obligatorio",
+    });
+    return;
+  }
+
+  if (!identity) {
+    res.status(400).json({
+      ok: false,
+      message: "identity es obligatorio",
+    });
+    return;
+  }
+
+  if (!hasLiveKitConfig()) {
+    res.status(503).json({
+      ok: false,
+      message:
+        "LiveKit no esta configurado en servidor. Configura LIVEKIT_URL, LIVEKIT_API_KEY y LIVEKIT_API_SECRET.",
+      livekitConfigured: false,
+      serverUrlConfigured: Boolean(LIVEKIT_URL),
+      apiKeyConfigured: Boolean(LIVEKIT_API_KEY),
+      apiSecretConfigured: Boolean(LIVEKIT_API_SECRET),
+    });
+    return;
+  }
+
+  try {
+    const token = await buildLiveKitToken({
+      roomName,
+      identity,
+      name,
+      role,
+    });
+    res.status(200).json({
+      ok: true,
+      provider: "livekit",
+      roomName,
+      identity,
+      name,
+      role,
+      serverUrl: LIVEKIT_URL,
+      token,
+      ttl: LIVEKIT_TOKEN_TTL,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: `No se pudo generar token LiveKit: ${error.message || error}`,
     });
   }
 });
