@@ -1742,33 +1742,24 @@ app.post("/access/drivers/upsert", (req, res) => {
       profile: next,
       drivers: listDriverAccessProfiles(),
       inviteEmailSent: false,
+      inviteQueued: false,
       inviteSkipped: true,
       activationUrl: null,
     });
     return;
   }
-  Promise.resolve(sendInviteEmail({ profile: next, activationUrl }))
-    .then((inviteResult) => {
-      res.status(200).json({
-        ok: true,
-        profile: next,
-        drivers: listDriverAccessProfiles(),
-        inviteEmailSent: inviteResult?.sent === true,
-        inviteSkipped: false,
-        activationUrl,
-      });
-    })
-    .catch((error) => {
-      res.status(200).json({
-        ok: true,
-        profile: next,
-        drivers: listDriverAccessProfiles(),
-        inviteEmailSent: false,
-        inviteSkipped: false,
-        activationUrl,
-        inviteError: error?.message || String(error),
-      });
-    });
+  res.status(200).json({
+    ok: true,
+    profile: next,
+    drivers: listDriverAccessProfiles(),
+    inviteEmailSent: false,
+    inviteQueued: true,
+    inviteSkipped: false,
+    activationUrl,
+  });
+  Promise.resolve(sendInviteEmail({ profile: next, activationUrl })).catch((error) => {
+    console.log(`invite-email failed: ${error.message || error}`);
+  });
 });
 
 app.post("/access/drivers/toggle", (req, res) => {
