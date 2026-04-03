@@ -235,6 +235,11 @@ function sanitizeUserProfile(raw, fallbackRole = "driver") {
     mapThemeMode: asString(user.mapThemeMode, "flow"),
     isOnline: user.isOnline !== false,
     avatarPath: asString(user.avatarPath, ""),
+    vehicleMake: asString(user.vehicleMake),
+    vehicleModel: asString(user.vehicleModel),
+    vehicleColor: asString(user.vehicleColor),
+    vehiclePlate: asString(user.vehiclePlate),
+    vehicleYear: asString(user.vehicleYear),
   };
 }
 
@@ -421,14 +426,6 @@ function resolveDriverSocketIds(driverId, driverIntercomId = "") {
   return Array.from(ids);
 }
 
-function toDriverStatusFromTripStatus(status, fallback = "Disponible") {
-  const normalized = asString(status).toLowerCase();
-  if (normalized === "assigned") return "Asignado";
-  if (normalized === "accepted") return "En camino";
-  if (normalized === "rejected") return "Disponible";
-  return fallback;
-}
-
 function ensureDriverRecord(socketId, name = "Driver") {
   const existing = drivers.get(socketId);
   if (existing) return existing;
@@ -439,7 +436,7 @@ function ensureDriverRecord(socketId, name = "Driver") {
     name,
     role: "driver",
     isOnline: true,
-    status: "Disponible",
+    status: "Disponible (Visible)",
     currentTripId: null,
     location: { latitude: 0, longitude: 0, speed: 0, timestamp: null },
     updatedAt: nowIso(),
@@ -478,6 +475,16 @@ function registerClient(socket, data) {
       name,
       role: "driver",
       isOnline: true,
+      email: asString(data?.email, existing.email || ""),
+      phoneNumber: asString(data?.phoneNumber, existing.phoneNumber || ""),
+      address: asString(data?.address, existing.address || ""),
+      governmentId: asString(data?.governmentId, existing.governmentId || ""),
+      avatarPath: asString(data?.avatarPath, existing.avatarPath || ""),
+      vehicleMake: asString(data?.vehicleMake, existing.vehicleMake || ""),
+      vehicleModel: asString(data?.vehicleModel, existing.vehicleModel || ""),
+      vehicleColor: asString(data?.vehicleColor, existing.vehicleColor || ""),
+      vehiclePlate: asString(data?.vehiclePlate, existing.vehiclePlate || ""),
+      vehicleYear: asString(data?.vehicleYear, existing.vehicleYear || ""),
       updatedAt: nowIso(),
     };
     drivers.set(socket.id, next);
@@ -553,11 +560,11 @@ function updateDriverFromTrip(trip) {
   );
   socketTargets.forEach((socketId) => {
     const record = ensureDriverRecord(socketId, "Driver");
-    const nextStatus = toDriverStatusFromTripStatus(trip.status, record.status);
     drivers.set(socketId, {
       ...record,
-      status: nextStatus,
-      currentTripId: trip.status === "rejected" ? null : trip.id,
+      status: asString(record.status, "Disponible (Visible)"),
+      currentTripId:
+        trip.status === "rejected" || trip.status === "completed" ? null : trip.id,
       isOnline: true,
       updatedAt: nowIso(),
     });
@@ -837,8 +844,11 @@ io.on("connection", (socket) => {
       ? socket.id
       : asString(data?.driverId, socket.id);
     const name = asString(data?.name, socket.data.name || "Driver");
-    const status = asString(data?.status, "Disponible");
+    const status = asString(data?.status, "Disponible (Visible)");
     const base = ensureDriverRecord(driverId, name);
+    const nextTripId = data?.currentTripId === null
+      ? null
+      : asString(data?.currentTripId, base.currentTripId || "");
     const next = {
       ...base,
       id: driverId,
@@ -847,6 +857,17 @@ io.on("connection", (socket) => {
       role: "driver",
       isOnline: true,
       status,
+      currentTripId: nextTripId || null,
+      email: asString(data?.email, base.email || ""),
+      phoneNumber: asString(data?.phoneNumber, base.phoneNumber || ""),
+      address: asString(data?.address, base.address || ""),
+      governmentId: asString(data?.governmentId, base.governmentId || ""),
+      avatarPath: asString(data?.avatarPath, base.avatarPath || ""),
+      vehicleMake: asString(data?.vehicleMake, base.vehicleMake || ""),
+      vehicleModel: asString(data?.vehicleModel, base.vehicleModel || ""),
+      vehicleColor: asString(data?.vehicleColor, base.vehicleColor || ""),
+      vehiclePlate: asString(data?.vehiclePlate, base.vehiclePlate || ""),
+      vehicleYear: asString(data?.vehicleYear, base.vehicleYear || ""),
       location: normalizeLocation(data),
       updatedAt: nowIso(),
     };
@@ -854,8 +875,15 @@ io.on("connection", (socket) => {
     drivers.set(driverId, next);
     io.emit("driver:location:update", {
       driverId: next.id,
+      intercomId: next.intercomId,
       name: next.name,
       status: next.status,
+      currentTripId: next.currentTripId || null,
+      vehicleMake: next.vehicleMake,
+      vehicleModel: next.vehicleModel,
+      vehicleColor: next.vehicleColor,
+      vehiclePlate: next.vehiclePlate,
+      vehicleYear: next.vehicleYear,
       ...next.location,
     });
     emitDriversList();
