@@ -1541,9 +1541,16 @@ app.post("/access/drivers/upsert", (req, res) => {
     });
     return;
   }
-  const activationToken = crypto.randomBytes(24).toString("hex");
-  const nextActivationHash = activationTokenHash(resolvedId, activationToken);
-  const activationUrl = buildActivationUrl(activationToken);
+  const shouldSendInvite =
+    !current || (!current.isActivated && !current.activationSentAt);
+  const activationToken = shouldSendInvite
+    ? crypto.randomBytes(24).toString("hex")
+    : null;
+  const nextActivationHash = activationToken
+    ? activationTokenHash(resolvedId, activationToken)
+    : current?.activationTokenHash || "";
+  const activationUrl = activationToken ? buildActivationUrl(activationToken) : null;
+  const passwordChanged = resolvedAccessCode !== (current?.accessCode || "");
   const next = sanitizeDriverAccess({
     id: resolvedId,
     displayName,
@@ -1553,10 +1560,10 @@ app.post("/access/drivers/upsert", (req, res) => {
     phoneNumber: asString(payload.phoneNumber, current?.phoneNumber || null),
     governmentId: asString(payload.governmentId, current?.governmentId || null),
     isActive: payload.isActive === false ? false : current?.isActive !== false,
-    isActivated: false,
+    isActivated: current?.isActivated === true,
     activationTokenHash: nextActivationHash,
-    activationSentAt: nowIso(),
-    activatedAt: null,
+    activationSentAt: current?.activationSentAt || (shouldSendInvite ? nowIso() : null),
+    activatedAt: current?.activatedAt || null,
     createdAt: current?.createdAt || nowIso(),
   });
   driverAccessProfiles.set(next.id, next);
@@ -1568,7 +1575,10 @@ app.post("/access/drivers/upsert", (req, res) => {
     role: "driver",
     passwordIdentity: next.id,
     password: next.accessCode,
-    passwordUpdatedAt: nowIso(),
+    passwordUpdatedAt:
+      passwordChanged || !currentAccount?.passwordUpdatedAt
+        ? nowIso()
+        : currentAccount.passwordUpdatedAt,
     savedAt: nowIso(),
     user: {
       ...(currentAccount?.user || {}),
@@ -1588,6 +1598,17 @@ app.post("/access/drivers/upsert", (req, res) => {
   });
   accountProfiles.set(accountKey, nextAccount);
   persistAccountProfiles();
+  if (!shouldSendInvite || !activationUrl) {
+    res.status(200).json({
+      ok: true,
+      profile: next,
+      drivers: listDriverAccessProfiles(),
+      inviteEmailSent: false,
+      inviteSkipped: true,
+      activationUrl: null,
+    });
+    return;
+  }
   Promise.resolve(sendInviteEmail({ profile: next, activationUrl }))
     .then((inviteResult) => {
       res.status(200).json({
@@ -1595,6 +1616,7 @@ app.post("/access/drivers/upsert", (req, res) => {
         profile: next,
         drivers: listDriverAccessProfiles(),
         inviteEmailSent: inviteResult?.sent === true,
+        inviteSkipped: false,
         activationUrl,
       });
     })
@@ -1604,6 +1626,7 @@ app.post("/access/drivers/upsert", (req, res) => {
         profile: next,
         drivers: listDriverAccessProfiles(),
         inviteEmailSent: false,
+        inviteSkipped: false,
         activationUrl,
         inviteError: error?.message || String(error),
       });
