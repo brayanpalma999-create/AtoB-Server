@@ -78,7 +78,7 @@ const RESEND_FROM_NAME = asString(
 );
 const PUBLIC_BASE_URL = asString(
   process.env.PUBLIC_BASE_URL,
-  "https://atob-server.onrender.com",
+  "https://atob-server-1.onrender.com",
 );
 let inviteTransporter = null;
 
@@ -101,7 +101,14 @@ function nowIso() {
 
 function asString(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
+  let text = String(value).trim();
+  text = text.replace(/^\uFEFF/, "");
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    text = text.slice(1, -1).trim();
+  }
   return text || fallback;
 }
 
