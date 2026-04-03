@@ -242,15 +242,16 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
       <style>
         :root {
           color-scheme: dark;
-          --bg: #050505;
-          --panel: rgba(12, 14, 18, 0.92);
-          --panel-soft: rgba(255,255,255,0.04);
+          --bg: #040506;
+          --panel: rgba(10, 12, 16, 0.9);
+          --panel-soft: rgba(255,255,255,0.045);
+          --panel-strong: rgba(255,255,255,0.065);
           --text: #f5f7fa;
-          --muted: #aeb6c2;
+          --muted: #a7b1bf;
           --accent: ${accent};
           --accent-soft: rgba(0,181,255,0.16);
+          --accent-line: rgba(0,181,255,0.32);
           --line: rgba(255,255,255,0.08);
-          --success: #41d891;
         }
         * { box-sizing: border-box; }
         body {
@@ -259,23 +260,24 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           display: grid;
           place-items: center;
           background:
-            radial-gradient(circle at top left, rgba(0,181,255,0.18), transparent 36%),
-            radial-gradient(circle at top right, rgba(90,112,255,0.12), transparent 28%),
-            linear-gradient(180deg, #090909 0%, var(--bg) 100%);
+            radial-gradient(circle at top left, rgba(0,181,255,0.22), transparent 34%),
+            radial-gradient(circle at top right, rgba(92,117,255,0.14), transparent 28%),
+            radial-gradient(circle at bottom, rgba(255,255,255,0.04), transparent 36%),
+            linear-gradient(180deg, #08090b 0%, var(--bg) 100%);
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           color: var(--text);
-          padding: 24px;
+          padding: 20px;
         }
         .card {
           position: relative;
           overflow: hidden;
-          width: min(100%, 480px);
+          width: min(100%, 520px);
           background: var(--panel);
           border: 1px solid var(--line);
-          border-radius: 30px;
+          border-radius: 32px;
           padding: 28px;
-          box-shadow: 0 30px 90px rgba(0,0,0,0.42);
-          backdrop-filter: blur(18px);
+          box-shadow: 0 36px 100px rgba(0,0,0,0.46);
+          backdrop-filter: blur(22px);
         }
         .card::before {
           content: "";
@@ -283,8 +285,8 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           inset: -1px;
           pointer-events: none;
           background:
-            linear-gradient(135deg, rgba(255,255,255,0.08), transparent 34%),
-            radial-gradient(circle at top right, var(--accent-soft), transparent 36%);
+            linear-gradient(135deg, rgba(255,255,255,0.12), transparent 30%),
+            radial-gradient(circle at top right, var(--accent-soft), transparent 38%);
           mask:
             linear-gradient(#000 0 0) content-box,
             linear-gradient(#000 0 0);
@@ -295,26 +297,31 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           -webkit-mask-composite: xor;
           padding: 1px;
         }
+        .topbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          margin-bottom: 18px;
+        }
         .mark {
-          width: 64px;
-          height: 64px;
+          width: 68px;
+          height: 68px;
           border-radius: 20px;
           display: grid;
           place-items: center;
           font-weight: 900;
-          letter-spacing: -1px;
+          letter-spacing: -0.06em;
           background:
             linear-gradient(135deg, rgba(255,255,255,0.22), rgba(255,255,255,0.04)),
             linear-gradient(135deg, var(--accent), #64d6ff);
           color: #041018;
-          margin-bottom: 16px;
-          box-shadow: 0 18px 40px rgba(0,181,255,0.28);
+          box-shadow: 0 20px 48px rgba(0,181,255,0.28);
         }
         .eyebrow {
           display: inline-flex;
           align-items: center;
           gap: 8px;
-          margin-bottom: 12px;
           padding: 8px 12px;
           border-radius: 999px;
           background: var(--panel-soft);
@@ -332,9 +339,55 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           background: var(--accent);
           box-shadow: 0 0 0 6px rgba(0,181,255,0.12);
         }
+        .hero {
+          position: relative;
+          margin-bottom: 18px;
+          padding: 20px 20px 18px;
+          border-radius: 24px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
+            radial-gradient(circle at top right, rgba(0,181,255,0.16), transparent 42%);
+          border: 1px solid rgba(255,255,255,0.08);
+        }
+        .hero::after {
+          content: "";
+          position: absolute;
+          top: 18px;
+          right: 18px;
+          width: 82px;
+          height: 82px;
+          border-radius: 24px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.02)),
+            linear-gradient(135deg, rgba(0,181,255,0.18), rgba(100,214,255,0.04));
+          border: 1px solid rgba(255,255,255,0.08);
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+        }
+        .hero-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 12px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.08);
+          color: #dce7f2;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .hero-badge::before {
+          content: "";
+          width: 10px;
+          height: 10px;
+          border-radius: 999px;
+          background: var(--accent);
+          box-shadow: 0 0 0 7px rgba(0,181,255,0.11);
+        }
         h1 {
           margin: 0 0 10px;
-          font-size: 31px;
+          max-width: 320px;
+          font-size: 34px;
           line-height: 1.03;
           letter-spacing: -0.03em;
         }
@@ -343,6 +396,14 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           color: var(--muted);
           line-height: 1.6;
           font-size: 15px;
+        }
+        .hero-copy {
+          max-width: 330px;
+          margin: 0;
+        }
+        .stack {
+          display: grid;
+          gap: 14px;
         }
         .button, button {
           appearance: none;
@@ -354,14 +415,19 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           padding: 15px 18px;
           cursor: pointer;
           width: 100%;
-          margin-top: 14px;
+          margin-top: 6px;
           font-size: 15px;
           box-shadow: 0 16px 34px rgba(0,181,255,0.22);
+          transition: transform 0.18s ease, box-shadow 0.18s ease;
+        }
+        .button:hover, button:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 18px 36px rgba(0,181,255,0.26);
         }
         .info {
-          margin: 18px 0 6px;
+          margin: 0;
           padding: 14px 16px;
-          border-radius: 18px;
+          border-radius: 20px;
           background: rgba(255,255,255,0.035);
           border: 1px solid var(--line);
         }
@@ -374,19 +440,86 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           text-transform: uppercase;
           color: #8f9baa;
         }
+        .metrics {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .metric {
+          padding: 14px 16px;
+          border-radius: 20px;
+          background: rgba(255,255,255,0.035);
+          border: 1px solid var(--line);
+        }
+        .metric strong {
+          display: block;
+          margin-top: 4px;
+          color: #fff;
+          font-size: 15px;
+          line-height: 1.4;
+          word-break: break-word;
+        }
+        .checklist {
+          margin: 0;
+          padding: 0;
+          list-style: none;
+          display: grid;
+          gap: 10px;
+        }
+        .checklist li {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          color: var(--muted);
+          line-height: 1.5;
+          font-size: 14px;
+        }
+        .checklist li::before {
+          content: "";
+          flex: 0 0 auto;
+          width: 10px;
+          height: 10px;
+          margin-top: 6px;
+          border-radius: 999px;
+          background: var(--accent);
+          box-shadow: 0 0 0 6px rgba(0,181,255,0.1);
+        }
+        .accent-line {
+          height: 1px;
+          margin: 6px 0 2px;
+          background: linear-gradient(90deg, var(--accent-line), transparent);
+        }
         .meta {
           margin-top: 16px;
           font-size: 12px;
           color: #8f96a1;
           line-height: 1.5;
         }
+        @media (max-width: 560px) {
+          body { padding: 14px; }
+          .card { padding: 20px; border-radius: 26px; }
+          .hero { padding: 18px 16px 16px; }
+          .hero::after { width: 64px; height: 64px; border-radius: 18px; }
+          h1 { max-width: 100%; font-size: 29px; }
+          .hero-copy { max-width: 100%; }
+          .metrics { grid-template-columns: 1fr; }
+        }
       </style>
     </head>
     <body>
       <main class="card">
-        <div class="mark">A2</div>
-        <div class="eyebrow">AtoB Activation</div>
-        ${body}
+        <div class="topbar">
+          <div class="mark">A2</div>
+          <div class="eyebrow">AtoB Activation</div>
+        </div>
+        <section class="hero">
+          <div class="hero-badge">Private driver invitation</div>
+          <h1>${title}</h1>
+          <p class="hero-copy">Acceso privado, activacion segura y preparacion lista para operar dentro de AtoB.</p>
+        </section>
+        <section class="stack">
+          ${body}
+        </section>
         <p class="meta" id="close-note" style="display:none">Si esta ventana no se cierra sola, ya puedes volver a la app.</p>
       </main>
       ${closeScript}
@@ -1547,8 +1680,10 @@ app.get("/access/activate", (req, res) => {
         title: "Activacion no disponible",
         accent: "#FF8A9A",
         body: `
-          <h1>Enlace invalido</h1>
-          <p>El enlace de activacion no es valido o esta incompleto.</p>
+          <div class="info">
+            <span class="label">Enlace no valido</span>
+            <p>El enlace de activacion no es valido o esta incompleto.</p>
+          </div>
           <div class="info">
             <span class="label">Que hacer</span>
             <p>Solicita una invitacion nueva desde el panel de administracion.</p>
@@ -1568,8 +1703,10 @@ app.get("/access/activate", (req, res) => {
         title: "Activacion no encontrada",
         accent: "#FF8A9A",
         body: `
-          <h1>Invitacion no encontrada</h1>
-          <p>Este enlace ya no esta disponible o fue reemplazado por una invitacion mas reciente.</p>
+          <div class="info">
+            <span class="label">Invitacion no encontrada</span>
+            <p>Este enlace ya no esta disponible o fue reemplazado por una invitacion mas reciente.</p>
+          </div>
           <div class="info">
             <span class="label">Siguiente paso</span>
             <p>Pide a operaciones que vuelva a enviarte una invitacion activa.</p>
@@ -1587,8 +1724,21 @@ app.get("/access/activate", (req, res) => {
         accent: "#72BBFF",
         autoClose: true,
         body: `
-          <h1>Tu cuenta ya esta activa</h1>
-          <p>${profile.displayName}, ya puedes volver a AtoB e iniciar sesion con tu correo asignado.</p>
+          <div class="info">
+            <span class="label">Estado actual</span>
+            <p>${profile.displayName}, ya puedes volver a AtoB e iniciar sesion con tu correo asignado.</p>
+          </div>
+          <div class="metrics">
+            <div class="metric">
+              <span class="label">Correo</span>
+              <strong>${profile.email}</strong>
+            </div>
+            <div class="metric">
+              <span class="label">Cuenta</span>
+              <strong>Activa</strong>
+            </div>
+          </div>
+          <div class="accent-line"></div>
           <div class="info">
             <span class="label">Estado</span>
             <p>Tu acceso ya esta confirmado en el servidor.</p>
@@ -1603,11 +1753,27 @@ app.get("/access/activate", (req, res) => {
     renderActivationShell({
       title: "Activa tu cuenta",
       body: `
-        <h1>Activa tu acceso</h1>
-        <p>${profile.displayName}, confirma la activacion de tu cuenta para empezar a usar AtoB.</p>
         <div class="info">
-          <span class="label">Correo asignado</span>
-          <p><strong style="color:#fff">${profile.email}</strong></p>
+          <span class="label">Invitacion lista</span>
+          <p>${profile.displayName}, confirma la activacion de tu cuenta para empezar a usar AtoB.</p>
+        </div>
+        <div class="metrics">
+          <div class="metric">
+            <span class="label">Correo asignado</span>
+            <strong>${profile.email}</strong>
+          </div>
+          <div class="metric">
+            <span class="label">Acceso</span>
+            <strong>Privado y manual</strong>
+          </div>
+        </div>
+        <div class="info">
+          <span class="label">Antes de continuar</span>
+          <ul class="checklist">
+            <li>Activa la cuenta desde este enlace unico.</li>
+            <li>Despues podras entrar con el correo asignado y la clave temporal.</li>
+            <li>Si el enlace caduca, operaciones puede emitir uno nuevo.</li>
+          </ul>
         </div>
         <form method="post" action="/access/activate/confirm">
           <input type="hidden" name="token" value="${token}" />
@@ -1626,8 +1792,10 @@ app.post("/access/activate/confirm", (req, res) => {
         title: "Activacion no disponible",
         accent: "#FF8A9A",
         body: `
-          <h1>Enlace invalido</h1>
-          <p>No se recibio el token de activacion.</p>
+          <div class="info">
+            <span class="label">Token faltante</span>
+            <p>No se recibio el token de activacion.</p>
+          </div>
           <div class="info">
             <span class="label">Que hacer</span>
             <p>Vuelve al correo de invitacion y abre el enlace completo.</p>
@@ -1647,8 +1815,10 @@ app.post("/access/activate/confirm", (req, res) => {
         title: "Invitacion no encontrada",
         accent: "#FF8A9A",
         body: `
-          <h1>Invitacion no disponible</h1>
-          <p>El enlace ya no es valido o fue reemplazado por una version nueva.</p>
+          <div class="info">
+            <span class="label">Invitacion no disponible</span>
+            <p>El enlace ya no es valido o fue reemplazado por una version nueva.</p>
+          </div>
           <div class="info">
             <span class="label">Siguiente paso</span>
             <p>Solicita una nueva invitacion desde el panel de admin.</p>
@@ -1674,9 +1844,22 @@ app.post("/access/activate/confirm", (req, res) => {
       accent: "#41D891",
       autoClose: true,
       body: `
-        <h1>Felicidades</h1>
-        <p>Tu cuenta en AtoB ya quedo activada correctamente.</p>
-        <p>Ya puedes volver a la app e iniciar sesion con tu correo asignado.</p>
+        <div class="metrics">
+          <div class="metric">
+            <span class="label">Resultado</span>
+            <strong>Activacion completada</strong>
+          </div>
+          <div class="metric">
+            <span class="label">Correo</span>
+            <strong>${profile.email}</strong>
+          </div>
+        </div>
+        <div class="info">
+          <span class="label">Felicidades</span>
+          <p>Tu cuenta en AtoB ya quedo activada correctamente.</p>
+          <p>Ya puedes volver a la app e iniciar sesion con tu correo asignado.</p>
+        </div>
+        <div class="accent-line"></div>
         <div class="info">
           <span class="label">Estado</span>
           <p>Activacion completada con exito.</p>
