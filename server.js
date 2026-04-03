@@ -1,5 +1,6 @@
 const express = require("express");
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -65,6 +66,15 @@ const SMTP_FROM_EMAIL = asString(
 const SMTP_FROM_NAME = asString(
   process.env.SMTP_FROM_NAME,
   "AtoB Dispatch",
+);
+const RESEND_API_KEY = asString(process.env.RESEND_API_KEY);
+const RESEND_FROM_EMAIL = asString(
+  process.env.RESEND_FROM_EMAIL,
+  "onboarding@resend.dev",
+);
+const RESEND_FROM_NAME = asString(
+  process.env.RESEND_FROM_NAME,
+  SMTP_FROM_NAME || "AtoB Dispatch",
 );
 const PUBLIC_BASE_URL = asString(
   process.env.PUBLIC_BASE_URL,
@@ -162,6 +172,10 @@ function activationTokenHash(profileId, token) {
 }
 
 function hasInviteEmailConfig() {
+  return hasResendConfig() || hasSmtpConfig();
+}
+
+function hasSmtpConfig() {
   return Boolean(
     SMTP_HOST &&
       SMTP_PORT > 0 &&
@@ -171,8 +185,12 @@ function hasInviteEmailConfig() {
   );
 }
 
+function hasResendConfig() {
+  return Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL);
+}
+
 function getInviteTransporter() {
-  if (!hasInviteEmailConfig()) return null;
+  if (!hasSmtpConfig()) return null;
   inviteTransporter ??= nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
@@ -376,16 +394,128 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
   </html>`;
 }
 
-async function sendInviteEmail({ profile, activationUrl }) {
-  const transporter = getInviteTransporter();
-  if (!transporter) {
-    throw new Error(
-      "SMTP no configurado en Render. Agrega SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL y SMTP_FROM_NAME.",
+function postJson(url, { headers = {}, body = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const request = https.request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          ...headers,
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let json = null;
+          try {
+            json = raw ? JSON.parse(raw) : null;
+          } catch (_) {
+            json = null;
+          }
+          resolve({
+            statusCode: response.statusCode || 0,
+            raw,
+            json,
+          });
+        });
+      },
     );
+    request.on("error", reject);
+    request.write(payload);
+    request.end();
+  });
+}
+
+async function sendInviteEmailWithResend({ profile, activationUrl, safeName, safeEmail, safeUrl }) {
+  const response = await postJson("https://api.resend.com/emails", {
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+    },
+    body: {
+      from: `"${RESEND_FROM_NAME}" <${RESEND_FROM_EMAIL}>`,
+      to: [profile.email],
+      subject: "Tu acceso a AtoB esta listo",
+      text:
+        `Hola ${profile.displayName}.\n\n` +
+        `Tu cuenta de AtoB ya fue creada por operaciones.\n` +
+        `Correo asignado: ${profile.email}\n` +
+        `Activa tu cuenta aqui: ${activationUrl}\n\n` +
+        `Si no esperabas este mensaje, puedes ignorarlo.`,
+      html: `
+        <div style="margin:0;padding:32px 18px;background:#060708;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+          <div style="max-width:620px;margin:0 auto;background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));border:1px solid rgba(255,255,255,0.08);border-radius:32px;padding:30px;box-shadow:0 32px 80px rgba(0,0,0,0.42);">
+            <div style="display:inline-grid;place-items:center;width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;font-weight:900;font-size:26px;box-shadow:0 18px 44px rgba(0,181,255,0.30);">A2</div>
+            <div style="margin-top:16px;display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:700;color:#d5e4ef;">AtoB Dispatch Invitation</div>
+            <h1 style="margin:18px 0 10px;font-size:32px;line-height:1.02;letter-spacing:-0.03em;">Tu acceso esta listo</h1>
+            <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.65;font-size:15px;">
+              Hola ${safeName}, operaciones preparo tu cuenta de AtoB para que empieces a trabajar con acceso privado y seguro.
+            </p>
+            <div style="margin:18px 0 10px;padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+              <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Correo asignado</div>
+              <div style="font-size:15px;font-weight:700;color:#ffffff;">${safeEmail}</div>
+            </div>
+            <p style="margin:0 0 14px;color:#b4bcc7;line-height:1.65;font-size:15px;">
+              Usa la clave temporal entregada por tu administrador y activa tu cuenta para desbloquear el inicio de sesion.
+            </p>
+            <a href="${safeUrl}" style="display:inline-block;margin-top:6px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;text-decoration:none;font-weight:800;padding:15px 20px;border-radius:999px;box-shadow:0 16px 34px rgba(0,181,255,0.22);">
+              Activar cuenta
+            </a>
+            <p style="margin:20px 0 10px;color:#8f96a1;font-size:12px;line-height:1.6;">
+              Si el boton no abre, copia este enlace en tu navegador:
+            </p>
+            <p style="margin:0;padding:14px 16px;border-radius:16px;background:#0d1014;border:1px solid rgba(255,255,255,0.06);font-size:12px;line-height:1.55;word-break:break-all;color:#d3dbe6;">
+              ${safeUrl}
+            </p>
+            <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.6;">
+              Si no esperabas este mensaje, puedes ignorarlo. Esta invitacion fue emitida por AtoB Dispatch.
+            </p>
+          </div>
+        </div>
+      `,
+    },
+  });
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const resendMessage =
+      response.json?.message ||
+      response.json?.error?.message ||
+      response.raw ||
+      "Error desconocido de Resend";
+    throw new Error(`Resend: ${resendMessage}`);
   }
+
+  return {
+    sent: true,
+    provider: "resend",
+    messageId: response.json?.id || null,
+  };
+}
+
+async function sendInviteEmail({ profile, activationUrl }) {
   const safeName = escapeHtml(profile.displayName || "Driver");
   const safeEmail = escapeHtml(profile.email || "");
   const safeUrl = escapeHtml(activationUrl);
+  if (hasResendConfig()) {
+    return sendInviteEmailWithResend({
+      profile,
+      activationUrl,
+      safeName,
+      safeEmail,
+      safeUrl,
+    });
+  }
+  const transporter = getInviteTransporter();
+  if (!transporter) {
+    throw new Error(
+      "No hay proveedor de correo configurado en Render. Agrega SMTP_* o RESEND_API_KEY + RESEND_FROM_EMAIL.",
+    );
+  }
   await transporter.sendMail({
     from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
     to: profile.email,
@@ -430,6 +560,7 @@ async function sendInviteEmail({ profile, activationUrl }) {
   });
   return {
     sent: true,
+    provider: "smtp",
   };
 }
 
