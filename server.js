@@ -1533,6 +1533,7 @@ app.post("/access/drivers/upsert", (req, res) => {
 
   const current = existingId ? driverAccessProfiles.get(existingId) : null;
   const resolvedId = existingId || id;
+  const skipInvite = payload.skipInvite === true;
   const resolvedAccessCode = accessCode || current?.accessCode || "";
   if (!resolvedAccessCode) {
     res.status(400).json({
@@ -1542,7 +1543,7 @@ app.post("/access/drivers/upsert", (req, res) => {
     return;
   }
   const shouldSendInvite =
-    !current || (!current.isActivated && !current.activationSentAt);
+    !skipInvite && (!current || (!current.isActivated && !current.activationSentAt));
   const activationToken = shouldSendInvite
     ? crypto.randomBytes(24).toString("hex")
     : null;
@@ -1560,10 +1561,15 @@ app.post("/access/drivers/upsert", (req, res) => {
     phoneNumber: asString(payload.phoneNumber, current?.phoneNumber || null),
     governmentId: asString(payload.governmentId, current?.governmentId || null),
     isActive: payload.isActive === false ? false : current?.isActive !== false,
-    isActivated: current?.isActivated === true,
+    isActivated:
+      current?.isActivated === true || payload.isActivated === true,
     activationTokenHash: nextActivationHash,
-    activationSentAt: current?.activationSentAt || (shouldSendInvite ? nowIso() : null),
-    activatedAt: current?.activatedAt || null,
+    activationSentAt:
+      current?.activationSentAt ||
+      asString(payload.activationSentAt, null) ||
+      (shouldSendInvite ? nowIso() : null),
+    activatedAt:
+      current?.activatedAt || asString(payload.activatedAt, null),
     createdAt: current?.createdAt || nowIso(),
   });
   driverAccessProfiles.set(next.id, next);
