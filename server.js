@@ -1788,6 +1788,71 @@ app.post("/access/drivers/toggle", (req, res) => {
   res.status(200).json({ ok: true, profile: next, drivers: listDriverAccessProfiles() });
 });
 
+app.post("/access/drivers/approve", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const id = asString(payload.id);
+  const email = normalizeEmail(payload.email);
+  let profile = null;
+
+  if (id && driverAccessProfiles.has(id)) {
+    profile = driverAccessProfiles.get(id);
+  }
+  if (!profile && email) {
+    profile = listDriverAccessProfiles().find(
+      (item) => normalizeEmail(item.email) === email,
+    );
+  }
+
+  if (!profile) {
+    res.status(404).json({
+      ok: false,
+      message: "Acceso no encontrado",
+    });
+    return;
+  }
+
+  const next = sanitizeDriverAccess({
+    ...profile,
+    isActive: true,
+    isActivated: true,
+    activatedAt: profile.activatedAt || nowIso(),
+    activationTokenHash: "",
+  });
+  driverAccessProfiles.set(next.id, next);
+  persistDriverAccessProfiles();
+
+  const respond = (welcomeSent, welcomeSkipped = false, welcomeError = null) => {
+    res.status(200).json({
+      ok: true,
+      profile: driverAccessProfiles.get(next.id),
+      drivers: listDriverAccessProfiles(),
+      welcomeEmailSent: welcomeSent,
+      welcomeSkipped,
+      welcomeError,
+    });
+  };
+
+  if (next.welcomeSentAt) {
+    respond(false, true, null);
+    return;
+  }
+
+  Promise.resolve(sendWelcomeEmail({ profile: next }))
+    .then(() => {
+      const welcomed = sanitizeDriverAccess({
+        ...next,
+        welcomeSentAt: nowIso(),
+      });
+      driverAccessProfiles.set(welcomed.id, welcomed);
+      persistDriverAccessProfiles();
+      respond(true, false, null);
+    })
+    .catch((error) => {
+      console.log(`approve-welcome-email failed: ${error.message || error}`);
+      respond(false, false, error?.message || String(error));
+    });
+});
+
 app.post("/access/drivers/remove", (req, res) => {
   const payload = req.body && typeof req.body === "object" ? req.body : {};
   const id = asString(payload.id);
