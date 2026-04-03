@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { RtcRole, RtcTokenBuilder } = require("agora-token");
 const { AccessToken } = require("livekit-server-sdk");
+const nodemailer = require("nodemailer");
 const { Server } = require("socket.io");
 
 const app = express();
@@ -52,8 +53,27 @@ const LIVEKIT_ROOM_NAME = asString(
   "atob-intercom",
 );
 const LIVEKIT_TOKEN_TTL = asString(process.env.LIVEKIT_TOKEN_TTL, "12h");
+const SMTP_HOST = asString(process.env.SMTP_HOST);
+const SMTP_PORT = Math.trunc(asNumber(process.env.SMTP_PORT, 587));
+const SMTP_SECURE = asString(process.env.SMTP_SECURE).toLowerCase() === "true";
+const SMTP_USER = asString(process.env.SMTP_USER);
+const SMTP_PASS = asString(process.env.SMTP_PASS);
+const SMTP_FROM_EMAIL = asString(
+  process.env.SMTP_FROM_EMAIL,
+  SMTP_USER || "dispatch@atobmobility.com",
+);
+const SMTP_FROM_NAME = asString(
+  process.env.SMTP_FROM_NAME,
+  "AtoB Dispatch",
+);
+const PUBLIC_BASE_URL = asString(
+  process.env.PUBLIC_BASE_URL,
+  "https://atob-server.onrender.com",
+);
+let inviteTransporter = null;
 
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
@@ -133,6 +153,181 @@ function secretTail(secret) {
   return value.length <= 2 ? value : value.slice(-2);
 }
 
+function activationTokenHash(profileId, token) {
+  return hashSecret({
+    scope: "driver-activation",
+    identity: profileId,
+    secret: token,
+  });
+}
+
+function hasInviteEmailConfig() {
+  return Boolean(
+    SMTP_HOST &&
+      SMTP_PORT > 0 &&
+      SMTP_FROM_EMAIL &&
+      SMTP_USER &&
+      SMTP_PASS,
+  );
+}
+
+function getInviteTransporter() {
+  if (!hasInviteEmailConfig()) return null;
+  inviteTransporter ??= nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+  return inviteTransporter;
+}
+
+function buildActivationUrl(token) {
+  const base = PUBLIC_BASE_URL.replace(/\/+$/, "");
+  return `${base}/access/activate?token=${encodeURIComponent(token)}`;
+}
+
+function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = false }) {
+  const closeScript = autoClose
+    ? `
+      <script>
+        setTimeout(() => {
+          window.close();
+          setTimeout(() => {
+            if (document.body) {
+              const note = document.getElementById("close-note");
+              if (note) note.style.display = "block";
+            }
+          }, 400);
+        }, 3200);
+      </script>
+    `
+    : "";
+  return `<!doctype html>
+  <html lang="es">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>${title}</title>
+      <style>
+        :root {
+          color-scheme: dark;
+          --bg: #050505;
+          --panel: #101214;
+          --text: #f5f7fa;
+          --muted: #b1b6be;
+          --accent: ${accent};
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          min-height: 100vh;
+          display: grid;
+          place-items: center;
+          background:
+            radial-gradient(circle at top, rgba(0,181,255,0.16), transparent 36%),
+            linear-gradient(180deg, #0b0b0b 0%, var(--bg) 100%);
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          color: var(--text);
+          padding: 24px;
+        }
+        .card {
+          width: min(100%, 460px);
+          background: rgba(16,18,20,0.96);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 28px;
+          padding: 28px;
+          box-shadow: 0 26px 80px rgba(0,0,0,0.42);
+        }
+        .mark {
+          width: 56px;
+          height: 56px;
+          border-radius: 18px;
+          display: grid;
+          place-items: center;
+          font-weight: 900;
+          letter-spacing: -1px;
+          background: linear-gradient(135deg, var(--accent), #64d6ff);
+          color: #041018;
+          margin-bottom: 18px;
+        }
+        h1 {
+          margin: 0 0 10px;
+          font-size: 28px;
+          line-height: 1.05;
+        }
+        p {
+          margin: 0 0 12px;
+          color: var(--muted);
+          line-height: 1.5;
+        }
+        .button, button {
+          appearance: none;
+          border: 0;
+          background: linear-gradient(135deg, var(--accent), #64d6ff);
+          color: #041018;
+          font-weight: 800;
+          border-radius: 999px;
+          padding: 14px 18px;
+          cursor: pointer;
+          width: 100%;
+          margin-top: 12px;
+          font-size: 15px;
+        }
+        .meta {
+          margin-top: 14px;
+          font-size: 12px;
+          color: #8f96a1;
+        }
+      </style>
+    </head>
+    <body>
+      <main class="card">
+        <div class="mark">A2</div>
+        ${body}
+        <p class="meta" id="close-note" style="display:none">Si esta ventana no se cierra sola, ya puedes volver a la app.</p>
+      </main>
+      ${closeScript}
+    </body>
+  </html>`;
+}
+
+async function sendInviteEmail({ profile, activationUrl }) {
+  const transporter = getInviteTransporter();
+  if (!transporter) {
+    return false;
+  }
+  await transporter.sendMail({
+    from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+    to: profile.email,
+    subject: "Activa tu acceso a AtoB",
+    html: `
+      <div style="margin:0;padding:32px;background:#050505;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        <div style="max-width:560px;margin:0 auto;background:#101214;border:1px solid rgba(255,255,255,0.08);border-radius:28px;padding:28px;">
+          <div style="width:56px;height:56px;border-radius:18px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;font-weight:900;font-size:24px;display:grid;place-items:center;">A2</div>
+          <h1 style="margin:18px 0 10px;font-size:28px;line-height:1.05;">Bienvenido a AtoB</h1>
+          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.55;">
+            Hola ${profile.displayName}, operaciones acaba de preparar tu acceso como driver.
+          </p>
+          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.55;">
+            Usa el correo <strong style="color:#fff">${profile.email}</strong> y la clave temporal compartida por tu administrador. Antes de iniciar sesion, activa tu cuenta con el siguiente boton.
+          </p>
+          <a href="${activationUrl}" style="display:inline-block;margin-top:10px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;text-decoration:none;font-weight:800;padding:14px 18px;border-radius:999px;">
+            Activar cuenta
+          </a>
+          <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.5;">
+            Si no solicitaste este acceso, ignora este mensaje. Este enlace fue emitido por AtoB Dispatch.
+          </p>
+        </div>
+      </div>
+    `,
+  });
+  return true;
+}
+
 function resolveDriverAccessHash(profile, candidate) {
   return ensureSecretHash({
     scope: "driver-access",
@@ -165,6 +360,7 @@ function sanitizeDriverAccess(profile) {
   const id = asString(profile.id);
   const email = normalizeEmail(profile.email);
   const rawAccessCode = asString(profile.accessCode);
+  const isActivated = profile.isActivated === false ? false : true;
   return {
     id,
     displayName: asString(profile.displayName),
@@ -179,6 +375,12 @@ function sanitizeDriverAccess(profile) {
     phoneNumber: asString(profile.phoneNumber, null),
     governmentId: asString(profile.governmentId, null),
     isActive: profile.isActive !== false,
+    isActivated,
+    activationTokenHash: asString(profile.activationTokenHash),
+    activationSentAt: asString(profile.activationSentAt, null),
+    activatedAt: isActivated
+      ? asString(profile.activatedAt, nowIso())
+      : asString(profile.activatedAt, null),
     createdAt: asString(profile.createdAt, nowIso()),
   };
 }
@@ -963,6 +1165,9 @@ app.post("/access/drivers/upsert", (req, res) => {
     });
     return;
   }
+  const activationToken = crypto.randomBytes(24).toString("hex");
+  const nextActivationHash = activationTokenHash(resolvedId, activationToken);
+  const activationUrl = buildActivationUrl(activationToken);
   const next = sanitizeDriverAccess({
     id: resolvedId,
     displayName,
@@ -972,6 +1177,10 @@ app.post("/access/drivers/upsert", (req, res) => {
     phoneNumber: asString(payload.phoneNumber, current?.phoneNumber || null),
     governmentId: asString(payload.governmentId, current?.governmentId || null),
     isActive: payload.isActive === false ? false : current?.isActive !== false,
+    isActivated: false,
+    activationTokenHash: nextActivationHash,
+    activationSentAt: nowIso(),
+    activatedAt: null,
     createdAt: current?.createdAt || nowIso(),
   });
   driverAccessProfiles.set(next.id, next);
@@ -1003,11 +1212,26 @@ app.post("/access/drivers/upsert", (req, res) => {
   });
   accountProfiles.set(accountKey, nextAccount);
   persistAccountProfiles();
-  res.status(200).json({
-    ok: true,
-    profile: next,
-    drivers: listDriverAccessProfiles(),
-  });
+  Promise.resolve(sendInviteEmail({ profile: next, activationUrl }))
+    .then((inviteEmailSent) => {
+      res.status(200).json({
+        ok: true,
+        profile: next,
+        drivers: listDriverAccessProfiles(),
+        inviteEmailSent,
+        activationUrl,
+      });
+    })
+    .catch((error) => {
+      res.status(200).json({
+        ok: true,
+        profile: next,
+        drivers: listDriverAccessProfiles(),
+        inviteEmailSent: false,
+        activationUrl,
+        inviteError: error?.message || String(error),
+      });
+    });
 });
 
 app.post("/access/drivers/toggle", (req, res) => {
@@ -1060,6 +1284,14 @@ app.post("/access/drivers/auth", (req, res) => {
     });
     return;
   }
+  if (!match.isActivated) {
+    res.status(403).json({
+      ok: false,
+      code: "activation_required",
+      message: "Debes activar la cuenta desde el correo de invitacion",
+    });
+    return;
+  }
   const candidateHash = resolveDriverAccessHash(match, accessCode);
   if (candidateHash !== match.accessCode) {
     res.status(401).json({
@@ -1069,6 +1301,126 @@ app.post("/access/drivers/auth", (req, res) => {
     return;
   }
   res.status(200).json({ ok: true, profile: match });
+});
+
+app.get("/access/activate", (req, res) => {
+  const token = asString(req.query.token);
+  if (!token) {
+    res.status(400).send(
+      renderActivationShell({
+        title: "Activacion no disponible",
+        accent: "#FF8A9A",
+        body: `
+          <h1>Enlace invalido</h1>
+          <p>El enlace de activacion no es valido o esta incompleto.</p>
+        `,
+      }),
+    );
+    return;
+  }
+
+  const profile = listDriverAccessProfiles().find(
+    (item) => item.activationTokenHash === activationTokenHash(item.id, token),
+  );
+  if (!profile) {
+    res.status(404).send(
+      renderActivationShell({
+        title: "Activacion no encontrada",
+        accent: "#FF8A9A",
+        body: `
+          <h1>Invitacion no encontrada</h1>
+          <p>Este enlace ya no esta disponible o fue reemplazado por una invitacion mas reciente.</p>
+        `,
+      }),
+    );
+    return;
+  }
+
+  if (profile.isActivated) {
+    res.status(200).send(
+      renderActivationShell({
+        title: "Cuenta activada",
+        accent: "#72BBFF",
+        autoClose: true,
+        body: `
+          <h1>Tu cuenta ya esta activa</h1>
+          <p>${profile.displayName}, ya puedes volver a AtoB e iniciar sesion con tu correo asignado.</p>
+        `,
+      }),
+    );
+    return;
+  }
+
+  res.status(200).send(
+    renderActivationShell({
+      title: "Activa tu cuenta",
+      body: `
+        <h1>Activa tu acceso</h1>
+        <p>${profile.displayName}, confirma la activacion de tu cuenta para empezar a usar AtoB.</p>
+        <p>Correo asignado: <strong style="color:#fff">${profile.email}</strong></p>
+        <form method="post" action="/access/activate/confirm">
+          <input type="hidden" name="token" value="${token}" />
+          <button type="submit">Activar cuenta</button>
+        </form>
+      `,
+    }),
+  );
+});
+
+app.post("/access/activate/confirm", (req, res) => {
+  const token = asString(req.body?.token || req.query?.token);
+  if (!token) {
+    res.status(400).send(
+      renderActivationShell({
+        title: "Activacion no disponible",
+        accent: "#FF8A9A",
+        body: `
+          <h1>Enlace invalido</h1>
+          <p>No se recibio el token de activacion.</p>
+        `,
+      }),
+    );
+    return;
+  }
+
+  const profile = listDriverAccessProfiles().find(
+    (item) => item.activationTokenHash === activationTokenHash(item.id, token),
+  );
+  if (!profile) {
+    res.status(404).send(
+      renderActivationShell({
+        title: "Invitacion no encontrada",
+        accent: "#FF8A9A",
+        body: `
+          <h1>Invitacion no disponible</h1>
+          <p>El enlace ya no es valido o fue reemplazado por una version nueva.</p>
+        `,
+      }),
+    );
+    return;
+  }
+
+  const next = sanitizeDriverAccess({
+    ...profile,
+    isActivated: true,
+    activatedAt: nowIso(),
+    activationTokenHash: "",
+  });
+  driverAccessProfiles.set(next.id, next);
+  persistDriverAccessProfiles();
+
+  res.status(200).send(
+    renderActivationShell({
+      title: "Cuenta activada",
+      accent: "#41D891",
+      autoClose: true,
+      body: `
+        <h1>Felicidades</h1>
+        <p>Tu cuenta en AtoB ya quedo activada correctamente.</p>
+        <p>Ya puedes volver a la app e iniciar sesion con tu correo asignado.</p>
+      `,
+    }),
+  );
 });
 
 app.get("/accounts/profile", (req, res) => {
