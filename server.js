@@ -1985,6 +1985,18 @@ app.post("/access/drivers/approve", (req, res) => {
       });
       driverAccessProfiles.set(welcomed.id, welcomed);
       persistDriverAccessProfiles();
+      const welcomedAccount = accountProfiles.get(profileAccountKey);
+      if (welcomedAccount) {
+        accountProfiles.set(
+          profileAccountKey,
+          sanitizeAccountProfile({
+            ...welcomedAccount,
+            savedAt: nowIso(),
+            driverAccessSnapshot: welcomed,
+          }),
+        );
+        persistAccountProfiles();
+      }
       respond(true, false, null);
     })
     .catch((error) => {
@@ -2283,6 +2295,18 @@ app.post("/access/activate/confirm", (req, res) => {
       });
       driverAccessProfiles.set(welcomed.id, welcomed);
       persistDriverAccessProfiles();
+      const welcomedAccount = accountProfiles.get(profileAccountKey);
+      if (welcomedAccount) {
+        accountProfiles.set(
+          profileAccountKey,
+          sanitizeAccountProfile({
+            ...welcomedAccount,
+            savedAt: nowIso(),
+            driverAccessSnapshot: welcomed,
+          }),
+        );
+        persistAccountProfiles();
+      }
       res.status(200).send(renderActivatedResponse(true));
     })
     .catch((error) => {
