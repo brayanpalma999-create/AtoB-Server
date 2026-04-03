@@ -1816,10 +1816,9 @@ app.post("/access/drivers/upsert", (req, res) => {
     isActivated:
       current?.isActivated === true || payload.isActivated === true,
     activationTokenHash: nextActivationHash,
-    activationSentAt: shouldSendInvite
-      ? nowIso()
-      : current?.activationSentAt ||
-        asString(payload.activationSentAt, null),
+    activationSentAt:
+      current?.activationSentAt ||
+      asString(payload.activationSentAt, null),
     activatedAt:
       current?.activatedAt || asString(payload.activatedAt, null),
     welcomeSentAt:
@@ -1871,18 +1870,47 @@ app.post("/access/drivers/upsert", (req, res) => {
     });
     return;
   }
-  res.status(200).json({
-    ok: true,
-    profile: next,
-    drivers: listDriverAccessProfiles(),
-    inviteEmailSent: false,
-    inviteQueued: true,
-    inviteSkipped: false,
-    activationUrl,
-  });
-  Promise.resolve(sendInviteEmail({ profile: next, activationUrl })).catch((error) => {
-    console.log(`invite-email failed: ${error.message || error}`);
-  });
+  Promise.resolve(sendInviteEmail({ profile: next, activationUrl }))
+    .then(() => {
+      const emailed = sanitizeDriverAccess({
+        ...next,
+        activationSentAt: nowIso(),
+      });
+      driverAccessProfiles.set(emailed.id, emailed);
+      persistDriverAccessProfiles();
+      accountProfiles.set(
+        accountKey,
+        sanitizeAccountProfile({
+          ...nextAccount,
+          savedAt: nowIso(),
+          driverAccessSnapshot: emailed,
+        }),
+      );
+      persistAccountProfiles();
+      res.status(200).json({
+        ok: true,
+        profile: emailed,
+        drivers: listDriverAccessProfiles(),
+        inviteEmailSent: true,
+        inviteQueued: false,
+        inviteSkipped: false,
+        activationUrl,
+        inviteError: null,
+      });
+    })
+    .catch((error) => {
+      console.log(`invite-email failed: ${error.message || error}`);
+      res.status(200).json({
+        ok: true,
+        profile: next,
+        drivers: listDriverAccessProfiles(),
+        inviteEmailSent: false,
+        inviteQueued: false,
+        inviteSkipped: false,
+        activationUrl,
+        inviteError: error?.message || String(error),
+      });
+    });
 });
 
 app.post("/access/drivers/toggle", (req, res) => {
