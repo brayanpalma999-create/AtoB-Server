@@ -190,6 +190,15 @@ function buildActivationUrl(token) {
   return `${base}/access/activate?token=${encodeURIComponent(token)}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = false }) {
   const closeScript = autoClose
     ? `
@@ -205,7 +214,7 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
         }, 3200);
       </script>
     `
-    : "";
+        : "";
   return `<!doctype html>
   <html lang="es">
     <head>
@@ -216,10 +225,14 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
         :root {
           color-scheme: dark;
           --bg: #050505;
-          --panel: #101214;
+          --panel: rgba(12, 14, 18, 0.92);
+          --panel-soft: rgba(255,255,255,0.04);
           --text: #f5f7fa;
-          --muted: #b1b6be;
+          --muted: #aeb6c2;
           --accent: ${accent};
+          --accent-soft: rgba(0,181,255,0.16);
+          --line: rgba(255,255,255,0.08);
+          --success: #41d891;
         }
         * { box-sizing: border-box; }
         body {
@@ -228,41 +241,90 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           display: grid;
           place-items: center;
           background:
-            radial-gradient(circle at top, rgba(0,181,255,0.16), transparent 36%),
-            linear-gradient(180deg, #0b0b0b 0%, var(--bg) 100%);
+            radial-gradient(circle at top left, rgba(0,181,255,0.18), transparent 36%),
+            radial-gradient(circle at top right, rgba(90,112,255,0.12), transparent 28%),
+            linear-gradient(180deg, #090909 0%, var(--bg) 100%);
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           color: var(--text);
           padding: 24px;
         }
         .card {
-          width: min(100%, 460px);
-          background: rgba(16,18,20,0.96);
-          border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 28px;
+          position: relative;
+          overflow: hidden;
+          width: min(100%, 480px);
+          background: var(--panel);
+          border: 1px solid var(--line);
+          border-radius: 30px;
           padding: 28px;
-          box-shadow: 0 26px 80px rgba(0,0,0,0.42);
+          box-shadow: 0 30px 90px rgba(0,0,0,0.42);
+          backdrop-filter: blur(18px);
+        }
+        .card::before {
+          content: "";
+          position: absolute;
+          inset: -1px;
+          pointer-events: none;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.08), transparent 34%),
+            radial-gradient(circle at top right, var(--accent-soft), transparent 36%);
+          mask:
+            linear-gradient(#000 0 0) content-box,
+            linear-gradient(#000 0 0);
+          -webkit-mask:
+            linear-gradient(#000 0 0) content-box,
+            linear-gradient(#000 0 0);
+          mask-composite: exclude;
+          -webkit-mask-composite: xor;
+          padding: 1px;
         }
         .mark {
-          width: 56px;
-          height: 56px;
-          border-radius: 18px;
+          width: 64px;
+          height: 64px;
+          border-radius: 20px;
           display: grid;
           place-items: center;
           font-weight: 900;
           letter-spacing: -1px;
-          background: linear-gradient(135deg, var(--accent), #64d6ff);
+          background:
+            linear-gradient(135deg, rgba(255,255,255,0.22), rgba(255,255,255,0.04)),
+            linear-gradient(135deg, var(--accent), #64d6ff);
           color: #041018;
-          margin-bottom: 18px;
+          margin-bottom: 16px;
+          box-shadow: 0 18px 40px rgba(0,181,255,0.28);
+        }
+        .eyebrow {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 12px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          background: var(--panel-soft);
+          border: 1px solid var(--line);
+          font-size: 12px;
+          font-weight: 700;
+          color: #d8e4ef;
+          letter-spacing: 0.02em;
+        }
+        .eyebrow::before {
+          content: "";
+          width: 8px;
+          height: 8px;
+          border-radius: 999px;
+          background: var(--accent);
+          box-shadow: 0 0 0 6px rgba(0,181,255,0.12);
         }
         h1 {
           margin: 0 0 10px;
-          font-size: 28px;
-          line-height: 1.05;
+          font-size: 31px;
+          line-height: 1.03;
+          letter-spacing: -0.03em;
         }
         p {
           margin: 0 0 12px;
           color: var(--muted);
-          line-height: 1.5;
+          line-height: 1.6;
+          font-size: 15px;
         }
         .button, button {
           appearance: none;
@@ -271,22 +333,41 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
           color: #041018;
           font-weight: 800;
           border-radius: 999px;
-          padding: 14px 18px;
+          padding: 15px 18px;
           cursor: pointer;
           width: 100%;
-          margin-top: 12px;
+          margin-top: 14px;
           font-size: 15px;
+          box-shadow: 0 16px 34px rgba(0,181,255,0.22);
+        }
+        .info {
+          margin: 18px 0 6px;
+          padding: 14px 16px;
+          border-radius: 18px;
+          background: rgba(255,255,255,0.035);
+          border: 1px solid var(--line);
+        }
+        .label {
+          display: block;
+          margin-bottom: 6px;
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: #8f9baa;
         }
         .meta {
-          margin-top: 14px;
+          margin-top: 16px;
           font-size: 12px;
           color: #8f96a1;
+          line-height: 1.5;
         }
       </style>
     </head>
     <body>
       <main class="card">
         <div class="mark">A2</div>
+        <div class="eyebrow">AtoB Activation</div>
         ${body}
         <p class="meta" id="close-note" style="display:none">Si esta ventana no se cierra sola, ya puedes volver a la app.</p>
       </main>
@@ -298,34 +379,58 @@ function renderActivationShell({ title, body, accent = "#00B5FF", autoClose = fa
 async function sendInviteEmail({ profile, activationUrl }) {
   const transporter = getInviteTransporter();
   if (!transporter) {
-    return false;
+    throw new Error(
+      "SMTP no configurado en Render. Agrega SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL y SMTP_FROM_NAME.",
+    );
   }
+  const safeName = escapeHtml(profile.displayName || "Driver");
+  const safeEmail = escapeHtml(profile.email || "");
+  const safeUrl = escapeHtml(activationUrl);
   await transporter.sendMail({
     from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
     to: profile.email,
-    subject: "Activa tu acceso a AtoB",
+    subject: "Tu acceso a AtoB esta listo",
+    text:
+      `Hola ${profile.displayName}.\n\n` +
+      `Tu cuenta de AtoB ya fue creada por operaciones.\n` +
+      `Correo asignado: ${profile.email}\n` +
+      `Activa tu cuenta aqui: ${activationUrl}\n\n` +
+      `Si no esperabas este mensaje, puedes ignorarlo.`,
     html: `
-      <div style="margin:0;padding:32px;background:#050505;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-        <div style="max-width:560px;margin:0 auto;background:#101214;border:1px solid rgba(255,255,255,0.08);border-radius:28px;padding:28px;">
-          <div style="width:56px;height:56px;border-radius:18px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;font-weight:900;font-size:24px;display:grid;place-items:center;">A2</div>
-          <h1 style="margin:18px 0 10px;font-size:28px;line-height:1.05;">Bienvenido a AtoB</h1>
-          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.55;">
-            Hola ${profile.displayName}, operaciones acaba de preparar tu acceso como driver.
+      <div style="margin:0;padding:32px 18px;background:#060708;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        <div style="max-width:620px;margin:0 auto;background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));border:1px solid rgba(255,255,255,0.08);border-radius:32px;padding:30px;box-shadow:0 32px 80px rgba(0,0,0,0.42);">
+          <div style="display:inline-grid;place-items:center;width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;font-weight:900;font-size:26px;box-shadow:0 18px 44px rgba(0,181,255,0.30);">A2</div>
+          <div style="margin-top:16px;display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:700;color:#d5e4ef;">AtoB Dispatch Invitation</div>
+          <h1 style="margin:18px 0 10px;font-size:32px;line-height:1.02;letter-spacing:-0.03em;">Tu acceso esta listo</h1>
+          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.65;font-size:15px;">
+            Hola ${safeName}, operaciones preparó tu cuenta de AtoB para que empieces a trabajar con acceso privado y seguro.
           </p>
-          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.55;">
-            Usa el correo <strong style="color:#fff">${profile.email}</strong> y la clave temporal compartida por tu administrador. Antes de iniciar sesion, activa tu cuenta con el siguiente boton.
+          <div style="margin:18px 0 10px;padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+            <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Correo asignado</div>
+            <div style="font-size:15px;font-weight:700;color:#ffffff;">${safeEmail}</div>
+          </div>
+          <p style="margin:0 0 14px;color:#b4bcc7;line-height:1.65;font-size:15px;">
+            Usa la clave temporal entregada por tu administrador y activa tu cuenta para desbloquear el inicio de sesión.
           </p>
-          <a href="${activationUrl}" style="display:inline-block;margin-top:10px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;text-decoration:none;font-weight:800;padding:14px 18px;border-radius:999px;">
+          <a href="${safeUrl}" style="display:inline-block;margin-top:6px;background:linear-gradient(135deg,#00B5FF,#6AD8FF);color:#041018;text-decoration:none;font-weight:800;padding:15px 20px;border-radius:999px;box-shadow:0 16px 34px rgba(0,181,255,0.22);">
             Activar cuenta
           </a>
-          <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.5;">
-            Si no solicitaste este acceso, ignora este mensaje. Este enlace fue emitido por AtoB Dispatch.
+          <p style="margin:20px 0 10px;color:#8f96a1;font-size:12px;line-height:1.6;">
+            Si el botón no abre, copia este enlace en tu navegador:
+          </p>
+          <p style="margin:0;padding:14px 16px;border-radius:16px;background:#0d1014;border:1px solid rgba(255,255,255,0.06);font-size:12px;line-height:1.55;word-break:break-all;color:#d3dbe6;">
+            ${safeUrl}
+          </p>
+          <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.6;">
+            Si no esperabas este mensaje, puedes ignorarlo. Esta invitación fue emitida por AtoB Dispatch.
           </p>
         </div>
       </div>
     `,
   });
-  return true;
+  return {
+    sent: true,
+  };
 }
 
 function resolveDriverAccessHash(profile, candidate) {
@@ -1213,12 +1318,12 @@ app.post("/access/drivers/upsert", (req, res) => {
   accountProfiles.set(accountKey, nextAccount);
   persistAccountProfiles();
   Promise.resolve(sendInviteEmail({ profile: next, activationUrl }))
-    .then((inviteEmailSent) => {
+    .then((inviteResult) => {
       res.status(200).json({
         ok: true,
         profile: next,
         drivers: listDriverAccessProfiles(),
-        inviteEmailSent,
+        inviteEmailSent: inviteResult?.sent === true,
         activationUrl,
       });
     })
@@ -1313,6 +1418,10 @@ app.get("/access/activate", (req, res) => {
         body: `
           <h1>Enlace invalido</h1>
           <p>El enlace de activacion no es valido o esta incompleto.</p>
+          <div class="info">
+            <span class="label">Que hacer</span>
+            <p>Solicita una invitacion nueva desde el panel de administracion.</p>
+          </div>
         `,
       }),
     );
@@ -1330,6 +1439,10 @@ app.get("/access/activate", (req, res) => {
         body: `
           <h1>Invitacion no encontrada</h1>
           <p>Este enlace ya no esta disponible o fue reemplazado por una invitacion mas reciente.</p>
+          <div class="info">
+            <span class="label">Siguiente paso</span>
+            <p>Pide a operaciones que vuelva a enviarte una invitacion activa.</p>
+          </div>
         `,
       }),
     );
@@ -1345,6 +1458,10 @@ app.get("/access/activate", (req, res) => {
         body: `
           <h1>Tu cuenta ya esta activa</h1>
           <p>${profile.displayName}, ya puedes volver a AtoB e iniciar sesion con tu correo asignado.</p>
+          <div class="info">
+            <span class="label">Estado</span>
+            <p>Tu acceso ya esta confirmado en el servidor.</p>
+          </div>
         `,
       }),
     );
@@ -1357,7 +1474,10 @@ app.get("/access/activate", (req, res) => {
       body: `
         <h1>Activa tu acceso</h1>
         <p>${profile.displayName}, confirma la activacion de tu cuenta para empezar a usar AtoB.</p>
-        <p>Correo asignado: <strong style="color:#fff">${profile.email}</strong></p>
+        <div class="info">
+          <span class="label">Correo asignado</span>
+          <p><strong style="color:#fff">${profile.email}</strong></p>
+        </div>
         <form method="post" action="/access/activate/confirm">
           <input type="hidden" name="token" value="${token}" />
           <button type="submit">Activar cuenta</button>
@@ -1377,6 +1497,10 @@ app.post("/access/activate/confirm", (req, res) => {
         body: `
           <h1>Enlace invalido</h1>
           <p>No se recibio el token de activacion.</p>
+          <div class="info">
+            <span class="label">Que hacer</span>
+            <p>Vuelve al correo de invitacion y abre el enlace completo.</p>
+          </div>
         `,
       }),
     );
@@ -1394,6 +1518,10 @@ app.post("/access/activate/confirm", (req, res) => {
         body: `
           <h1>Invitacion no disponible</h1>
           <p>El enlace ya no es valido o fue reemplazado por una version nueva.</p>
+          <div class="info">
+            <span class="label">Siguiente paso</span>
+            <p>Solicita una nueva invitacion desde el panel de admin.</p>
+          </div>
         `,
       }),
     );
@@ -1418,6 +1546,10 @@ app.post("/access/activate/confirm", (req, res) => {
         <h1>Felicidades</h1>
         <p>Tu cuenta en AtoB ya quedo activada correctamente.</p>
         <p>Ya puedes volver a la app e iniciar sesion con tu correo asignado.</p>
+        <div class="info">
+          <span class="label">Estado</span>
+          <p>Activacion completada con exito.</p>
+        </div>
       `,
     }),
   );
