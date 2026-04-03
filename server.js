@@ -971,8 +971,79 @@ function sanitizeAccountProfile(record) {
     ),
     passwordUpdatedAt: asString(record?.passwordUpdatedAt, nowIso()),
     savedAt: asString(record?.savedAt, nowIso()),
+    driverAccessSnapshot:
+      record?.driverAccessSnapshot &&
+      typeof record.driverAccessSnapshot === "object"
+        ? sanitizeDriverAccess(record.driverAccessSnapshot)
+        : null,
     user,
   };
+}
+
+function recoverDriverAccessProfilesFromAccounts() {
+  let changed = false;
+  for (const record of accountProfiles.values()) {
+    if (!record || asString(record.role, "driver") !== "driver") continue;
+    const snapshot =
+      record.driverAccessSnapshot && typeof record.driverAccessSnapshot === "object"
+        ? sanitizeDriverAccess(record.driverAccessSnapshot)
+        : sanitizeDriverAccess({
+            id: asString(record.user?.id, record.passwordIdentity || record.accountKey),
+            displayName: asString(record.user?.legalName, record.user?.name),
+            email: normalizeEmail(record.user?.email),
+            accessCode: asString(record.password),
+            accessCodeTail: "",
+            phoneNumber: asString(record.user?.phoneNumber, null),
+            governmentId: asString(record.user?.governmentId, null),
+            isActive: true,
+            isActivated: true,
+            activatedAt: asString(record.savedAt, nowIso()),
+            createdAt: asString(record.savedAt, nowIso()),
+          });
+    if (!snapshot.id || !snapshot.email || !snapshot.accessCode) continue;
+
+    let existingId = null;
+    for (const [profileId, profile] of driverAccessProfiles.entries()) {
+      if (
+        profileId === snapshot.id ||
+        normalizeEmail(profile.email) === normalizeEmail(snapshot.email)
+      ) {
+        existingId = profileId;
+        break;
+      }
+    }
+
+    if (existingId) {
+      const current = driverAccessProfiles.get(existingId);
+      const merged = sanitizeDriverAccess({
+        ...snapshot,
+        ...current,
+        id: existingId,
+        email: normalizeEmail(current?.email || snapshot.email),
+        accessCode: asString(current?.accessCode, snapshot.accessCode),
+        accessCodeTail: asString(current?.accessCodeTail, snapshot.accessCodeTail),
+        phoneNumber: asString(current?.phoneNumber, snapshot.phoneNumber),
+        governmentId: asString(current?.governmentId, snapshot.governmentId),
+        isActive: current?.isActive !== false,
+        isActivated: current?.isActivated === true || snapshot.isActivated === true,
+        activationTokenHash: asString(current?.activationTokenHash),
+        activationSentAt: asString(current?.activationSentAt, snapshot.activationSentAt),
+        activatedAt: asString(current?.activatedAt, snapshot.activatedAt),
+        welcomeSentAt: asString(current?.welcomeSentAt, snapshot.welcomeSentAt),
+        createdAt: asString(current?.createdAt, snapshot.createdAt),
+      });
+      driverAccessProfiles.set(existingId, merged);
+      continue;
+    }
+
+    driverAccessProfiles.set(snapshot.id, snapshot);
+    changed = true;
+  }
+
+  if (changed) {
+    persistDriverAccessProfiles();
+  }
+  return changed;
 }
 
 function loadAccountProfiles() {
@@ -1519,6 +1590,7 @@ persistDriverAccessProfiles();
 loadAccountProfiles();
 ensureFixedAdminAccountProfile();
 persistAccountProfiles();
+recoverDriverAccessProfilesFromAccounts();
 
 io.on("connection", (socket) => {
   console.log(`client connected: ${socket.id}`);
@@ -1632,6 +1704,7 @@ app.get("/", (_, res) => {
 });
 
 app.get("/access/drivers", (_, res) => {
+  recoverDriverAccessProfilesFromAccounts();
   res.status(200).json({
     ok: true,
     drivers: listDriverAccessProfiles(),
@@ -1718,6 +1791,7 @@ app.post("/access/drivers/upsert", (req, res) => {
         ? nowIso()
         : currentAccount.passwordUpdatedAt,
     savedAt: nowIso(),
+    driverAccessSnapshot: next,
     user: {
       ...(currentAccount?.user || {}),
       id: currentAccount?.user?.id || next.id,
@@ -1776,6 +1850,19 @@ app.post("/access/drivers/toggle", (req, res) => {
   });
   driverAccessProfiles.set(id, next);
   persistDriverAccessProfiles();
+  const profileAccountKey = `driver:${normalizeEmail(next.email)}`;
+  const currentAccount = accountProfiles.get(profileAccountKey);
+  if (currentAccount) {
+    accountProfiles.set(
+      profileAccountKey,
+      sanitizeAccountProfile({
+        ...currentAccount,
+        savedAt: nowIso(),
+        driverAccessSnapshot: next,
+      }),
+    );
+    persistAccountProfiles();
+  }
   res.status(200).json({ ok: true, profile: next, drivers: listDriverAccessProfiles() });
 });
 
@@ -1811,6 +1898,19 @@ app.post("/access/drivers/approve", (req, res) => {
   });
   driverAccessProfiles.set(next.id, next);
   persistDriverAccessProfiles();
+  const profileAccountKey = `driver:${normalizeEmail(next.email)}`;
+  const currentAccount = accountProfiles.get(profileAccountKey);
+  if (currentAccount) {
+    accountProfiles.set(
+      profileAccountKey,
+      sanitizeAccountProfile({
+        ...currentAccount,
+        savedAt: nowIso(),
+        driverAccessSnapshot: next,
+      }),
+    );
+    persistAccountProfiles();
+  }
 
   const respond = (welcomeSent, welcomeSkipped = false, welcomeError = null) => {
     res.status(200).json({
@@ -1853,6 +1953,23 @@ app.post("/access/drivers/remove", (req, res) => {
   }
   driverAccessProfiles.delete(id);
   persistDriverAccessProfiles();
+  const accountToRemove = Array.from(accountProfiles.entries()).find(
+    ([, record]) =>
+      asString(record.role, "driver") === "driver" &&
+      sanitizeDriverAccess(record.driverAccessSnapshot || {}).id === id,
+  );
+  if (accountToRemove) {
+    const [accountKey, currentAccount] = accountToRemove;
+    accountProfiles.set(
+      accountKey,
+      sanitizeAccountProfile({
+        ...currentAccount,
+        savedAt: nowIso(),
+        driverAccessSnapshot: null,
+      }),
+    );
+    persistAccountProfiles();
+  }
   res.status(200).json({ ok: true, drivers: listDriverAccessProfiles() });
 });
 
@@ -2061,6 +2178,19 @@ app.post("/access/activate/confirm", (req, res) => {
   });
   driverAccessProfiles.set(next.id, next);
   persistDriverAccessProfiles();
+  const profileAccountKey = `driver:${normalizeEmail(next.email)}`;
+  const currentAccount = accountProfiles.get(profileAccountKey);
+  if (currentAccount) {
+    accountProfiles.set(
+      profileAccountKey,
+      sanitizeAccountProfile({
+        ...currentAccount,
+        savedAt: nowIso(),
+        driverAccessSnapshot: next,
+      }),
+    );
+    persistAccountProfiles();
+  }
   const renderActivatedResponse = (welcomeSent) =>
     renderActivationShell({
       title: "Cuenta activada",
