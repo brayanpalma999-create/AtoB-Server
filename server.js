@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { RtcRole, RtcTokenBuilder } = require("agora-token");
 const { AccessToken } = require("livekit-server-sdk");
 const { Server } = require("socket.io");
@@ -19,6 +20,16 @@ const ACCESS_STORE_PATH = path.join(__dirname, "driver_access_store.json");
 const ACCOUNT_STORE_PATH = path.join(__dirname, "account_profile_store.json");
 const driverAccessProfiles = new Map(); // key: id
 const accountProfiles = new Map(); // key: accountKey
+const AUTH_HASH_PREFIX = "hmac-sha256:";
+const AUTH_HASH_PEPPER = "atob::dispatch::secure::2026";
+const FIXED_ADMIN_EMAIL = normalizeEmail(
+  process.env.ATOB_ADMIN_EMAIL || "devb12004@gmail.com",
+);
+const FIXED_ADMIN_CREDENTIAL_ID = "admin:primary";
+const FIXED_ADMIN_PASSWORD_HASH = asString(
+  process.env.ATOB_ADMIN_PASSWORD_HASH,
+  "hmac-sha256:6cd3ac218bd61b2d0e2068e68778ca8ded4b0b140fa67edde51d1109f19c4de5",
+);
 
 let channelBusy = false;
 let channelOwnerId = null;
@@ -88,12 +99,83 @@ function normalizeEmail(value) {
   return asString(value).toLowerCase();
 }
 
+function isSecureHash(value) {
+  const text = asString(value);
+  return text.startsWith(AUTH_HASH_PREFIX) && text.length > AUTH_HASH_PREFIX.length;
+}
+
+function hashSecret({ scope, identity, secret }) {
+  const normalizedScope = asString(scope).toLowerCase();
+  const normalizedIdentity = asString(identity).toLowerCase();
+  const normalizedSecret = asString(secret);
+  if (!normalizedScope || !normalizedIdentity || !normalizedSecret) {
+    return "";
+  }
+  const key = `${AUTH_HASH_PEPPER}|${normalizedScope}`;
+  const payload = `${normalizedScope}|${normalizedIdentity}|${normalizedSecret}`;
+  const digest = crypto
+    .createHmac("sha256", key)
+    .update(payload)
+    .digest("hex");
+  return `${AUTH_HASH_PREFIX}${digest}`;
+}
+
+function ensureSecretHash({ scope, identity, secretOrHash }) {
+  const value = asString(secretOrHash);
+  if (!value) return "";
+  if (isSecureHash(value)) return value;
+  return hashSecret({ scope, identity, secret: value });
+}
+
+function secretTail(secret) {
+  const value = asString(secret);
+  if (!value) return "";
+  return value.length <= 2 ? value : value.slice(-2);
+}
+
+function resolveDriverAccessHash(profile, candidate) {
+  return ensureSecretHash({
+    scope: "driver-access",
+    identity: profile.id,
+    secretOrHash: candidate,
+  });
+}
+
+function resolveAccountPasswordHash(passwordIdentity, candidate) {
+  return ensureSecretHash({
+    scope: "account",
+    identity: passwordIdentity,
+    secretOrHash: candidate,
+  });
+}
+
+function resolveAccountPasswordIdentity({
+  accountKey,
+  role,
+  user,
+  passwordIdentity,
+}) {
+  if (asString(role, "driver") === "admin") {
+    return FIXED_ADMIN_CREDENTIAL_ID;
+  }
+  return asString(passwordIdentity, asString(user?.id, accountKey));
+}
+
 function sanitizeDriverAccess(profile) {
+  const id = asString(profile.id);
+  const email = normalizeEmail(profile.email);
+  const rawAccessCode = asString(profile.accessCode);
   return {
-    id: asString(profile.id),
+    id,
     displayName: asString(profile.displayName),
-    email: normalizeEmail(profile.email),
-    accessCode: asString(profile.accessCode),
+    email,
+    accessCode: id
+      ? resolveDriverAccessHash({ id, email }, rawAccessCode)
+      : rawAccessCode,
+    accessCodeTail: asString(
+      profile.accessCodeTail,
+      isSecureHash(rawAccessCode) ? "" : secretTail(rawAccessCode),
+    ),
     phoneNumber: asString(profile.phoneNumber, null),
     governmentId: asString(profile.governmentId, null),
     isActive: profile.isActive !== false,
@@ -158,13 +240,25 @@ function sanitizeUserProfile(raw, fallbackRole = "driver") {
 
 function sanitizeAccountProfile(record) {
   const fallbackRole = asString(record?.role, "driver");
-  return {
-    accountKey: asString(record?.accountKey),
+  const user = sanitizeUserProfile(record?.user, fallbackRole);
+  const accountKey = asString(record?.accountKey);
+  const passwordIdentity = resolveAccountPasswordIdentity({
+    accountKey,
     role: fallbackRole,
-    password: asString(record?.password),
+    user,
+    passwordIdentity: record?.passwordIdentity,
+  });
+  return {
+    accountKey,
+    role: fallbackRole,
+    passwordIdentity,
+    password: resolveAccountPasswordHash(
+      passwordIdentity,
+      asString(record?.password),
+    ),
     passwordUpdatedAt: asString(record?.passwordUpdatedAt, nowIso()),
     savedAt: asString(record?.savedAt, nowIso()),
-    user: sanitizeUserProfile(record?.user, fallbackRole),
+    user,
   };
 }
 
@@ -197,6 +291,39 @@ function persistAccountProfiles() {
   } catch (error) {
     console.log(`account-store save failed: ${error.message || error}`);
   }
+}
+
+function ensureFixedAdminAccountProfile() {
+  const accountKey = `admin:${FIXED_ADMIN_EMAIL}`;
+  const current = sanitizeAccountProfile(accountProfiles.get(accountKey) || {
+    accountKey,
+    role: "admin",
+  });
+  const next = sanitizeAccountProfile({
+    ...current,
+    accountKey,
+    role: "admin",
+    passwordIdentity: FIXED_ADMIN_CREDENTIAL_ID,
+    password: FIXED_ADMIN_PASSWORD_HASH,
+    passwordUpdatedAt: current.passwordUpdatedAt || nowIso(),
+    savedAt: nowIso(),
+    user: {
+      ...current.user,
+      id: asString(current.user?.id, "adm_dispatch_primary"),
+      name: asString(current.user?.name, "Admin"),
+      legalName: asString(current.user?.legalName, "Admin Dispatch"),
+      role: "admin",
+      email: FIXED_ADMIN_EMAIL,
+      phoneNumber: asString(current.user?.phoneNumber, "+1 804 555 1200"),
+      address: asString(current.user?.address, "Virginia dispatch lane"),
+      governmentId: asString(current.user?.governmentId, "ADM-PRIMARY"),
+      languageCode: asString(current.user?.languageCode, "es"),
+      mapThemeMode: asString(current.user?.mapThemeMode, "flow"),
+      avatarPath: asString(current.user?.avatarPath, ""),
+      isOnline: true,
+    },
+  });
+  accountProfiles.set(accountKey, next);
 }
 
 function hasAgoraTokenConfig() {
@@ -673,7 +800,10 @@ function routeChatMessage(socket, raw) {
 }
 
 loadDriverAccessProfiles();
+persistDriverAccessProfiles();
 loadAccountProfiles();
+ensureFixedAdminAccountProfile();
+persistAccountProfiles();
 
 io.on("connection", (socket) => {
   console.log(`client connected: ${socket.id}`);
@@ -778,10 +908,11 @@ app.post("/access/drivers/upsert", (req, res) => {
   const email = normalizeEmail(payload.email);
   const displayName = asString(payload.displayName);
   const accessCode = asString(payload.accessCode);
-  if (!displayName || !email || !accessCode) {
+  const accessCodeTail = asString(payload.accessCodeTail);
+  if (!displayName || !email) {
     res.status(400).json({
       ok: false,
-      message: "displayName, email y accessCode son obligatorios",
+      message: "displayName y email son obligatorios",
     });
     return;
   }
@@ -795,11 +926,21 @@ app.post("/access/drivers/upsert", (req, res) => {
   }
 
   const current = existingId ? driverAccessProfiles.get(existingId) : null;
+  const resolvedId = existingId || id;
+  const resolvedAccessCode = accessCode || current?.accessCode || "";
+  if (!resolvedAccessCode) {
+    res.status(400).json({
+      ok: false,
+      message: "accessCode es obligatorio para crear o actualizar acceso",
+    });
+    return;
+  }
   const next = sanitizeDriverAccess({
-    id: existingId || id,
+    id: resolvedId,
     displayName,
     email,
-    accessCode,
+    accessCode: resolvedAccessCode,
+    accessCodeTail: accessCodeTail || current?.accessCodeTail || "",
     phoneNumber: asString(payload.phoneNumber, current?.phoneNumber || null),
     governmentId: asString(payload.governmentId, current?.governmentId || null),
     isActive: payload.isActive === false ? false : current?.isActive !== false,
@@ -812,7 +953,8 @@ app.post("/access/drivers/upsert", (req, res) => {
   const nextAccount = sanitizeAccountProfile({
     accountKey,
     role: "driver",
-    password: accessCode,
+    passwordIdentity: next.id,
+    password: next.accessCode,
     passwordUpdatedAt: nowIso(),
     savedAt: nowIso(),
     user: {
@@ -881,12 +1023,17 @@ app.post("/access/drivers/auth", (req, res) => {
     return;
   }
   const match = listDriverAccessProfiles().find(
-    (profile) =>
-      profile.isActive &&
-      normalizeEmail(profile.email) === email &&
-      profile.accessCode === accessCode,
+    (profile) => profile.isActive && normalizeEmail(profile.email) === email,
   );
   if (!match) {
+    res.status(401).json({
+      ok: false,
+      message: "Acceso invalido",
+    });
+    return;
+  }
+  const candidateHash = resolveDriverAccessHash(match, accessCode);
+  if (candidateHash !== match.accessCode) {
     res.status(401).json({
       ok: false,
       message: "Acceso invalido",
@@ -935,6 +1082,10 @@ app.post("/accounts/profile/upsert", (req, res) => {
   const next = sanitizeAccountProfile({
     accountKey,
     role,
+    passwordIdentity: asString(
+      payload.passwordIdentity,
+      current?.passwordIdentity || "",
+    ),
     password: asString(payload.password, current?.password || ""),
     passwordUpdatedAt: asString(
       payload.passwordUpdatedAt,
