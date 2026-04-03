@@ -704,6 +704,135 @@ async function sendInviteEmail({ profile, activationUrl }) {
   };
 }
 
+async function sendWelcomeEmailWithResend({ profile, safeName, safeEmail }) {
+  const response = await postJson("https://api.resend.com/emails", {
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+    },
+    body: {
+      from: `"${RESEND_FROM_NAME}" <${RESEND_FROM_EMAIL}>`,
+      to: [profile.email],
+      subject: "Bienvenido a AtoB: tu cuenta ya esta activa",
+      text:
+        `Hola ${profile.displayName}.\n\n` +
+        `Tu cuenta de AtoB ya quedo activada correctamente.\n` +
+        `Correo asignado: ${profile.email}\n\n` +
+        `Nos alegra tenerte dentro. Ya puedes abrir la app, iniciar sesion y empezar tu ruta con una operacion clara, segura y profesional.\n\n` +
+        `Bienvenido a bordo.\nAtoB Dispatch`,
+      html: `
+        <div style="margin:0;padding:32px 18px;background:#050607;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+          <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at top left, rgba(61,220,151,0.20), transparent 38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));border:1px solid rgba(255,255,255,0.08);border-radius:34px;padding:32px;box-shadow:0 34px 90px rgba(0,0,0,0.42);">
+            <div style="display:inline-grid;place-items:center;width:68px;height:68px;border-radius:22px;background:linear-gradient(135deg,#3DDC97,#72BBFF);color:#071018;font-weight:900;font-size:28px;box-shadow:0 20px 46px rgba(61,220,151,0.26);">A2</div>
+            <div style="margin-top:16px;display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:800;color:#d8e5ef;">Welcome to AtoB</div>
+            <h1 style="margin:18px 0 10px;font-size:34px;line-height:1.02;letter-spacing:-0.03em;">Tu cuenta ya esta activa</h1>
+            <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.7;font-size:15px;">
+              Hola ${safeName}, tu acceso ya quedo confirmado y listo para usarse. Este es el inicio de una experiencia mas fluida, clara y profesional dentro de AtoB.
+            </p>
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:20px 0;">
+              <div style="padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+                <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Estado</div>
+                <div style="font-size:16px;font-weight:800;color:#ffffff;">Cuenta activa</div>
+              </div>
+              <div style="padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+                <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Correo asignado</div>
+                <div style="font-size:15px;font-weight:700;color:#ffffff;">${safeEmail}</div>
+              </div>
+            </div>
+            <div style="padding:18px;border-radius:22px;background:rgba(61,220,151,0.10);border:1px solid rgba(61,220,151,0.24);">
+              <div style="font-size:12px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#b8f4d6;margin-bottom:8px;">Siguiente paso</div>
+              <p style="margin:0;color:#e8f2f8;line-height:1.7;font-size:14px;">
+                Abre la app, inicia sesion con tu correo asignado y empieza a explorar tu operacion. Cada ruta nueva es una oportunidad para avanzar con orden, enfoque y confianza.
+              </p>
+            </div>
+            <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.6;">
+              Gracias por formar parte de AtoB. Esta bienvenida solo se envia una vez por cuenta.
+            </p>
+          </div>
+        </div>
+      `,
+    },
+  });
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const resendMessage =
+      response.json?.message ||
+      response.json?.error?.message ||
+      response.raw ||
+      "Error desconocido de Resend";
+    throw new Error(`Resend: ${resendMessage}`);
+  }
+
+  return {
+    sent: true,
+    provider: "resend",
+    messageId: response.json?.id || null,
+  };
+}
+
+async function sendWelcomeEmail({ profile }) {
+  const safeName = escapeHtml(profile.displayName || "Driver");
+  const safeEmail = escapeHtml(profile.email || "");
+  if (hasResendConfig()) {
+    return sendWelcomeEmailWithResend({
+      profile,
+      safeName,
+      safeEmail,
+    });
+  }
+  const transporter = getInviteTransporter();
+  if (!transporter) {
+    throw new Error(
+      "No hay proveedor de correo configurado en Render. Agrega SMTP_* o RESEND_API_KEY + RESEND_FROM_EMAIL.",
+    );
+  }
+  await transporter.sendMail({
+    from: `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`,
+    to: profile.email,
+    subject: "Bienvenido a AtoB: tu cuenta ya esta activa",
+    text:
+      `Hola ${profile.displayName}.\n\n` +
+      `Tu cuenta de AtoB ya quedo activada correctamente.\n` +
+      `Correo asignado: ${profile.email}\n\n` +
+      `Nos alegra tenerte dentro. Ya puedes abrir la app, iniciar sesion y empezar tu ruta con una operacion clara, segura y profesional.\n\n` +
+      `Bienvenido a bordo.\nAtoB Dispatch`,
+    html: `
+      <div style="margin:0;padding:32px 18px;background:#050607;color:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at top left, rgba(61,220,151,0.20), transparent 38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));border:1px solid rgba(255,255,255,0.08);border-radius:34px;padding:32px;box-shadow:0 34px 90px rgba(0,0,0,0.42);">
+          <div style="display:inline-grid;place-items:center;width:68px;height:68px;border-radius:22px;background:linear-gradient(135deg,#3DDC97,#72BBFF);color:#071018;font-weight:900;font-size:28px;box-shadow:0 20px 46px rgba(61,220,151,0.26);">A2</div>
+          <div style="margin-top:16px;display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);font-size:12px;font-weight:800;color:#d8e5ef;">Welcome to AtoB</div>
+          <h1 style="margin:18px 0 10px;font-size:34px;line-height:1.02;letter-spacing:-0.03em;">Tu cuenta ya esta activa</h1>
+          <p style="margin:0 0 12px;color:#b4bcc7;line-height:1.7;font-size:15px;">
+            Hola ${safeName}, tu acceso ya quedo confirmado y listo para usarse. Este es el inicio de una experiencia mas fluida, clara y profesional dentro de AtoB.
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:20px 0;">
+            <div style="padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+              <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Estado</div>
+              <div style="font-size:16px;font-weight:800;color:#ffffff;">Cuenta activa</div>
+            </div>
+            <div style="padding:16px;border-radius:18px;background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.08);">
+              <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#8f9baa;margin-bottom:6px;">Correo asignado</div>
+              <div style="font-size:15px;font-weight:700;color:#ffffff;">${safeEmail}</div>
+            </div>
+          </div>
+          <div style="padding:18px;border-radius:22px;background:rgba(61,220,151,0.10);border:1px solid rgba(61,220,151,0.24);">
+            <div style="font-size:12px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#b8f4d6;margin-bottom:8px;">Siguiente paso</div>
+            <p style="margin:0;color:#e8f2f8;line-height:1.7;font-size:14px;">
+              Abre la app, inicia sesion con tu correo asignado y empieza a explorar tu operacion. Cada ruta nueva es una oportunidad para avanzar con orden, enfoque y confianza.
+            </p>
+          </div>
+          <p style="margin:18px 0 0;color:#8f96a1;font-size:12px;line-height:1.6;">
+            Gracias por formar parte de AtoB. Esta bienvenida solo se envia una vez por cuenta.
+          </p>
+        </div>
+      </div>
+    `,
+  });
+  return {
+    sent: true,
+    provider: "smtp",
+  };
+}
+
 function resolveDriverAccessHash(profile, candidate) {
   return ensureSecretHash({
     scope: "driver-access",
@@ -757,6 +886,7 @@ function sanitizeDriverAccess(profile) {
     activatedAt: isActivated
       ? asString(profile.activatedAt, nowIso())
       : asString(profile.activatedAt, null),
+    welcomeSentAt: asString(profile.welcomeSentAt, null),
     createdAt: asString(profile.createdAt, nowIso()),
   };
 }
@@ -1570,6 +1700,8 @@ app.post("/access/drivers/upsert", (req, res) => {
       (shouldSendInvite ? nowIso() : null),
     activatedAt:
       current?.activatedAt || asString(payload.activatedAt, null),
+    welcomeSentAt:
+      current?.welcomeSentAt || asString(payload.welcomeSentAt, null),
     createdAt: current?.createdAt || nowIso(),
   });
   driverAccessProfiles.set(next.id, next);
@@ -1873,8 +2005,7 @@ app.post("/access/activate/confirm", (req, res) => {
   });
   driverAccessProfiles.set(next.id, next);
   persistDriverAccessProfiles();
-
-  res.status(200).send(
+  const renderActivatedResponse = (welcomeSent) =>
     renderActivationShell({
       title: "Cuenta activada",
       accent: "#41D891",
@@ -1899,10 +2030,30 @@ app.post("/access/activate/confirm", (req, res) => {
         <div class="info">
           <span class="label">Estado</span>
           <p>Activacion completada con exito.</p>
+          <p>${welcomeSent ? "Tambien enviamos un correo de bienvenida a tu bandeja." : "Tu bienvenida se esta preparando en segundo plano."}</p>
         </div>
       `,
-    }),
-  );
+    });
+
+  if (next.welcomeSentAt) {
+    res.status(200).send(renderActivatedResponse(true));
+    return;
+  }
+
+  Promise.resolve(sendWelcomeEmail({ profile: next }))
+    .then(() => {
+      const welcomed = sanitizeDriverAccess({
+        ...next,
+        welcomeSentAt: nowIso(),
+      });
+      driverAccessProfiles.set(welcomed.id, welcomed);
+      persistDriverAccessProfiles();
+      res.status(200).send(renderActivatedResponse(true));
+    })
+    .catch((error) => {
+      console.log(`welcome-email failed: ${error.message || error}`);
+      res.status(200).send(renderActivatedResponse(false));
+    });
 });
 
 app.get("/accounts/profile", (req, res) => {
