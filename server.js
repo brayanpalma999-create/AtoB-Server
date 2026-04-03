@@ -976,6 +976,15 @@ function sanitizeAccountProfile(record) {
       typeof record.driverAccessSnapshot === "object"
         ? sanitizeDriverAccess(record.driverAccessSnapshot)
         : null,
+    authorizedDriversBackup: Array.isArray(record?.authorizedDriversBackup)
+      ? record.authorizedDriversBackup
+          .filter((item) => item && typeof item === "object")
+          .map((item) => sanitizeDriverAccess(item))
+      : [],
+    authorizedDriversUpdatedAt: asString(
+      record?.authorizedDriversUpdatedAt,
+      null,
+    ),
     user,
   };
 }
@@ -1040,6 +1049,32 @@ function recoverDriverAccessProfilesFromAccounts() {
     changed = true;
   }
 
+  if (changed) {
+    persistDriverAccessProfiles();
+  }
+  return changed;
+}
+
+function recoverDriverAccessProfilesFromAdminBackups() {
+  let changed = false;
+  for (const record of accountProfiles.values()) {
+    if (!record || asString(record.role, "driver") !== "admin") continue;
+    const backup = Array.isArray(record.authorizedDriversBackup)
+      ? record.authorizedDriversBackup
+      : [];
+    for (const item of backup) {
+      const snapshot = sanitizeDriverAccess(item);
+      if (!snapshot.id || !snapshot.email || !snapshot.accessCode) continue;
+      const exists = Array.from(driverAccessProfiles.values()).some(
+        (profile) =>
+          profile.id === snapshot.id ||
+          normalizeEmail(profile.email) === normalizeEmail(snapshot.email),
+      );
+      if (exists) continue;
+      driverAccessProfiles.set(snapshot.id, snapshot);
+      changed = true;
+    }
+  }
   if (changed) {
     persistDriverAccessProfiles();
   }
@@ -1591,6 +1626,7 @@ loadAccountProfiles();
 ensureFixedAdminAccountProfile();
 persistAccountProfiles();
 recoverDriverAccessProfilesFromAccounts();
+recoverDriverAccessProfilesFromAdminBackups();
 
 io.on("connection", (socket) => {
   console.log(`client connected: ${socket.id}`);
@@ -1705,6 +1741,7 @@ app.get("/", (_, res) => {
 
 app.get("/access/drivers", (_, res) => {
   recoverDriverAccessProfilesFromAccounts();
+  recoverDriverAccessProfilesFromAdminBackups();
   res.status(200).json({
     ok: true,
     drivers: listDriverAccessProfiles(),
@@ -2291,6 +2328,13 @@ app.post("/accounts/profile/upsert", (req, res) => {
       current?.passwordUpdatedAt || nowIso(),
     ),
     savedAt: nowIso(),
+    authorizedDriversBackup: Array.isArray(payload.authorizedDriversBackup)
+      ? payload.authorizedDriversBackup
+      : current?.authorizedDriversBackup || [],
+    authorizedDriversUpdatedAt: asString(
+      payload.authorizedDriversUpdatedAt,
+      current?.authorizedDriversUpdatedAt || null,
+    ),
     user: {
       ...(current?.user || {}),
       ...incomingUser,
