@@ -1043,6 +1043,21 @@ function sanitizeAccountProfile(record) {
   };
 }
 
+function publicAccountProfile(record) {
+  const safe = sanitizeAccountProfile(record);
+  return {
+    accountKey: safe.accountKey,
+    role: safe.role,
+    passwordIdentity: safe.passwordIdentity,
+    passwordUpdatedAt: safe.passwordUpdatedAt,
+    savedAt: safe.savedAt,
+    driverAccessSnapshot: safe.driverAccessSnapshot,
+    authorizedDriversBackup: safe.authorizedDriversBackup,
+    authorizedDriversUpdatedAt: safe.authorizedDriversUpdatedAt,
+    user: safe.user,
+  };
+}
+
 function recoverDriverAccessProfilesFromAccounts() {
   let changed = false;
   for (const record of accountProfiles.values()) {
@@ -1513,7 +1528,48 @@ async function buildLiveKitToken({ roomName, identity, name, role }) {
 }
 
 function emitDriversList() {
-  io.emit("drivers:list", Array.from(drivers.values()));
+  io.emit("drivers:list", listConnectedDriversUnique());
+}
+
+function driverDedupKey(driver) {
+  if (!driver || typeof driver !== "object") return "";
+  const intercomId = asString(driver.intercomId);
+  const email = normalizeEmail(driver.email);
+  if (intercomId) return `intercom:${intercomId}`;
+  if (email) return `email:${email}`;
+  return `id:${asString(driver.id)}`;
+}
+
+function listConnectedDriversUnique() {
+  const deduped = new Map();
+  for (const driver of drivers.values()) {
+    if (!driver || typeof driver !== "object") continue;
+    const key = driverDedupKey(driver);
+    const current = deduped.get(key);
+    if (!current) {
+      deduped.set(key, driver);
+      continue;
+    }
+    const currentUpdated = Date.parse(asString(current.updatedAt, current.createdAt || ""));
+    const nextUpdated = Date.parse(asString(driver.updatedAt, driver.createdAt || ""));
+    const preferNext =
+      (Number.isFinite(nextUpdated) ? nextUpdated : 0) >=
+      (Number.isFinite(currentUpdated) ? currentUpdated : 0);
+    if (preferNext) {
+      deduped.set(key, driver);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
+function pruneDriverDuplicates(socketId, nextDriver) {
+  const nextKey = driverDedupKey(nextDriver);
+  if (!nextKey) return;
+  for (const [existingSocketId, existingDriver] of drivers.entries()) {
+    if (existingSocketId === socketId) continue;
+    if (driverDedupKey(existingDriver) !== nextKey) continue;
+    drivers.delete(existingSocketId);
+  }
 }
 
 function resolveIntercomId(data, fallback = "") {
@@ -1585,7 +1641,7 @@ function registerClient(socket, data) {
   if (role === "admin") {
     admins.add(socket.id);
     socket.emit("admin:connected");
-    socket.emit("drivers:list", Array.from(drivers.values()));
+    socket.emit("drivers:list", listConnectedDriversUnique());
     return;
   }
 
@@ -1610,6 +1666,7 @@ function registerClient(socket, data) {
       vehicleYear: asString(data?.vehicleYear, existing.vehicleYear || ""),
       updatedAt: nowIso(),
     };
+    pruneDriverDuplicates(socket.id, next);
     drivers.set(socket.id, next);
     emitDriversList();
   }
@@ -2941,7 +2998,23 @@ app.get("/accounts/profile", (req, res) => {
     });
     return;
   }
-  res.status(200).json({ ok: true, profile });
+  res.status(200).json({ ok: true, profile: publicAccountProfile(profile) });
+});
+
+app.get("/accounts/profiles", (req, res) => {
+  const role = asString(req.query.role);
+  const limit = Math.max(1, Math.trunc(asNumber(req.query.limit, 300)));
+  let profiles = Array.from(accountProfiles.values()).map(publicAccountProfile);
+  if (role) {
+    profiles = profiles.filter(
+      (profile) => asString(profile.role).toLowerCase() === role.toLowerCase(),
+    );
+  }
+  profiles.sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+  res.status(200).json({
+    ok: true,
+    profiles: profiles.slice(0, limit),
+  });
 });
 
 app.post("/accounts/profile/upsert", (req, res) => {
@@ -2990,6 +3063,29 @@ app.post("/accounts/profile/upsert", (req, res) => {
 
   accountProfiles.set(accountKey, next);
   persistAccountProfiles();
+  if (role === "driver") {
+    recordAuditEvent({
+      type: "driver_profile_updated",
+      scope: "account",
+      title: "Perfil del driver actualizado",
+      message: `${asString(next.user?.legalName || next.user?.name, accountKey)}`,
+      metadata: {
+        accountKey,
+        userId: asString(next.user?.id),
+        email: asString(next.user?.email),
+      },
+    });
+    pushOperationalNotification({
+      kind: "driver_profile_updated",
+      title: "Perfil actualizado",
+      message: asString(next.user?.legalName || next.user?.name, accountKey),
+      metadata: {
+        accountKey,
+        userId: asString(next.user?.id),
+        email: asString(next.user?.email),
+      },
+    });
+  }
   if (payload.auditTrail === true) {
     recordAuditEvent({
       type: "account_profile_upserted",
@@ -3003,7 +3099,7 @@ app.post("/accounts/profile/upsert", (req, res) => {
       },
     });
   }
-  res.status(200).json({ ok: true, profile: next });
+  res.status(200).json({ ok: true, profile: publicAccountProfile(next) });
 });
 
 app.get("/agora/rtc-token", (req, res) => {
