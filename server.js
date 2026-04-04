@@ -1288,6 +1288,36 @@ function recoverDriverAccessProfilesFromAdminBackups() {
   return changed;
 }
 
+function mergeAuthorizedDriverBackups(primaryList, secondaryList) {
+  const merged = [];
+  const ingest = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const raw of items) {
+      if (!raw || typeof raw !== "object") continue;
+      const profile = sanitizeDriverAccess(raw);
+      if (!profile.id || !profile.email) continue;
+      const existingIndex = merged.findIndex(
+        (item) =>
+          item.id === profile.id ||
+          normalizeEmail(item.email) === normalizeEmail(profile.email),
+      );
+      if (existingIndex < 0) {
+        merged.push(profile);
+        continue;
+      }
+      merged[existingIndex] = sanitizeDriverAccess({
+        ...merged[existingIndex],
+        ...profile,
+        id: asString(profile.id, merged[existingIndex].id),
+        email: normalizeEmail(profile.email || merged[existingIndex].email),
+      });
+    }
+  };
+  ingest(secondaryList);
+  ingest(primaryList);
+  return merged;
+}
+
 function loadAccountProfiles() {
   try {
     const decoded = loadCollectionRecords({
@@ -3686,6 +3716,17 @@ app.post("/accounts/profile/upsert", (req, res) => {
   const incomingUser =
     payload.user && typeof payload.user === "object" ? payload.user : {};
   const role = asString(payload.role, incomingUser.role || "driver");
+  const replaceAuthorizedDriversBackup =
+    payload.replaceAuthorizedDriversBackup === true;
+
+  const mergedAuthorizedDriversBackup = Array.isArray(payload.authorizedDriversBackup)
+    ? replaceAuthorizedDriversBackup
+      ? payload.authorizedDriversBackup
+      : mergeAuthorizedDriverBackups(
+          payload.authorizedDriversBackup,
+          current?.authorizedDriversBackup || [],
+        )
+    : current?.authorizedDriversBackup || [];
 
   if (!accountKey) {
     res.status(400).json({
@@ -3709,9 +3750,7 @@ app.post("/accounts/profile/upsert", (req, res) => {
       current?.passwordUpdatedAt || nowIso(),
     ),
     savedAt: nowIso(),
-    authorizedDriversBackup: Array.isArray(payload.authorizedDriversBackup)
-      ? payload.authorizedDriversBackup
-      : current?.authorizedDriversBackup || [],
+    authorizedDriversBackup: mergedAuthorizedDriversBackup,
     authorizedDriversUpdatedAt: asString(
       payload.authorizedDriversUpdatedAt,
       current?.authorizedDriversUpdatedAt || null,
