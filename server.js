@@ -2162,7 +2162,11 @@ function updateDriverFromTrip(trip) {
       ...record,
       status: asString(record.status, "Disponible (Visible)"),
       currentTripId:
-        trip.status === "rejected" || trip.status === "completed" ? null : trip.id,
+        trip.status === "rejected" ||
+        trip.status === "completed" ||
+        trip.status === "cancelled"
+          ? null
+          : trip.id,
       isOnline: true,
       updatedAt: nowIso(),
     });
@@ -2241,7 +2245,7 @@ function handleTripDecision(raw, status) {
   });
   io.emit("trip:update", next);
 
-  if (status === "rejected") {
+  if (status === "rejected" || status === "cancelled") {
     const socketTargets = resolveDriverSocketIds(
       next.driverId,
       next.driverIntercomId,
@@ -2264,12 +2268,14 @@ function handleTripDecision(raw, status) {
     picked_up: "Cliente recogido",
     completed: "Viaje completado",
     rejected: "Viaje rechazado",
+    cancelled: "Asignacion cancelada",
   };
   const messageByStatus = {
     accepted: `El driver ${next.driverId} acepto el viaje ${next.id}`,
     picked_up: `El driver ${next.driverId} ya recogio al pasajero`,
     completed: `El viaje ${next.id} quedo completado`,
     rejected: `El viaje ${next.id} fue rechazado`,
+    cancelled: `El viaje ${next.id} fue cancelado por administracion`,
   };
   recordAuditEvent({
     type: `trip_${status}`,
@@ -2604,6 +2610,7 @@ io.on("connection", (socket) => {
   socket.on("trip:picked_up", (data) => handleTripDecision(data || {}, "picked_up"));
   socket.on("trip:completed", (data) => handleTripDecision(data || {}, "completed"));
   socket.on("trip:rejected", (data) => handleTripDecision(data || {}, "rejected"));
+  socket.on("trip:cancelled", (data) => handleTripDecision(data || {}, "cancelled"));
   socket.on("trip:update", (data) => handleTripUpdate(data || {}));
   socket.on("chat:send", (data) => routeChatMessage(socket, data || {}));
 
