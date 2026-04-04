@@ -4,10 +4,13 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const Sentry = require("@sentry/node");
+const admin = require("firebase-admin");
 const { RtcRole, RtcTokenBuilder } = require("agora-token");
 const { AccessToken } = require("livekit-server-sdk");
 const nodemailer = require("nodemailer");
 const { Server } = require("socket.io");
+const { createStateDatabase } = require("./database");
 
 const app = express();
 const server = http.createServer(app);
@@ -18,6 +21,16 @@ const PERSISTENCE_ROOT = asString(
   process.env.DATA_DIR || process.env.RENDER_DISK_PATH,
   __dirname,
 );
+const stateDatabase = createStateDatabase({ rootDir: PERSISTENCE_ROOT });
+const SQLITE_DB_PATH = stateDatabase.dbPath;
+const COLLECTION_ACCESS = "driver_access_profiles";
+const COLLECTION_ACCOUNTS = "account_profiles";
+const COLLECTION_TRIPS = "trips";
+const COLLECTION_AUDIT = "audit_events";
+const COLLECTION_NOTIFICATIONS = "operational_notifications";
+const COLLECTION_SUPPORT = "support_tickets";
+const COLLECTION_TELEMETRY = "telemetry_events";
+const COLLECTION_PUSH_DEVICES = "push_devices";
 
 const drivers = new Map(); // key: socketId
 const admins = new Set(); // socketIds
@@ -27,14 +40,22 @@ const ACCOUNT_STORE_PATH = path.join(PERSISTENCE_ROOT, "account_profile_store.js
 const TRIP_STORE_PATH = path.join(PERSISTENCE_ROOT, "trip_store.json");
 const AUDIT_STORE_PATH = path.join(PERSISTENCE_ROOT, "audit_store.json");
 const NOTIFICATION_STORE_PATH = path.join(PERSISTENCE_ROOT, "notification_store.json");
+const SUPPORT_STORE_PATH = path.join(PERSISTENCE_ROOT, "support_ticket_store.json");
+const TELEMETRY_STORE_PATH = path.join(PERSISTENCE_ROOT, "telemetry_store.json");
+const PUSH_DEVICE_STORE_PATH = path.join(PERSISTENCE_ROOT, "push_device_store.json");
 const driverAccessProfiles = new Map(); // key: id
 const accountProfiles = new Map(); // key: accountKey
 const auditEvents = [];
 const operationalNotifications = [];
+const supportTickets = [];
+const telemetryEvents = [];
+const pushDeviceRegistrations = new Map();
 const AUTH_HASH_PREFIX = "hmac-sha256:";
 const AUTH_HASH_PEPPER = "atob::dispatch::secure::2026";
 const MAX_AUDIT_EVENTS = 600;
 const MAX_OPERATIONAL_NOTIFICATIONS = 300;
+const MAX_SUPPORT_TICKETS = 500;
+const MAX_TELEMETRY_EVENTS = 1000;
 const FIXED_ADMIN_EMAIL = normalizeEmail(
   process.env.ATOB_ADMIN_EMAIL || "devb12004@gmail.com",
 );
@@ -91,6 +112,9 @@ const PUBLIC_BASE_URL = asString(
   process.env.PUBLIC_BASE_URL,
   "https://atob-server-1.onrender.com",
 );
+const SENTRY_DSN = asString(process.env.SENTRY_DSN || process.env.SENTRY_NODE_DSN);
+const FIREBASE_SERVICE_ACCOUNT_JSON = asString(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+const FIREBASE_PROJECT_ID = asString(process.env.FIREBASE_PROJECT_ID);
 const PERSISTENCE_MODE = asString(
   process.env.PERSISTENCE_MODE,
   process.env.RENDER || process.env.RENDER_SERVICE_ID
@@ -98,6 +122,7 @@ const PERSISTENCE_MODE = asString(
     : "filesystem",
 );
 let inviteTransporter = null;
+let firebaseReady = false;
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
@@ -111,6 +136,86 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+initializeServerTelemetry();
+initializeFirebasePush();
+
+function initializeServerTelemetry() {
+  if (!SENTRY_DSN) return;
+  try {
+    Sentry.init({
+      dsn: SENTRY_DSN,
+      environment: asString(process.env.APP_ENV || process.env.NODE_ENV, "production"),
+      tracesSampleRate: asNumber(process.env.SENTRY_TRACES_SAMPLE_RATE, 0.15),
+      release: asString(process.env.RENDER_GIT_COMMIT, "atob-server@local"),
+    });
+  } catch (error) {
+    console.log(`sentry init failed: ${error.message || error}`);
+  }
+}
+
+function parseJsonObjectEnv(rawValue) {
+  const text = asString(rawValue);
+  if (!text) return null;
+  try {
+    const normalized = text
+      .replace(/\r/g, "")
+      .replace(/\n/g, "")
+      .replace(/\\n/g, "\n");
+    const parsed = JSON.parse(normalized);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function initializeFirebasePush() {
+  try {
+    const serviceAccount = parseJsonObjectEnv(FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: asString(serviceAccount.project_id, FIREBASE_PROJECT_ID || undefined),
+      });
+      firebaseReady = true;
+      return;
+    }
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS || FIREBASE_PROJECT_ID) {
+      admin.initializeApp({
+        credential: admin.credential.applicationDefault(),
+        projectId: FIREBASE_PROJECT_ID || undefined,
+      });
+      firebaseReady = true;
+    }
+  } catch (error) {
+    firebaseReady = false;
+    console.log(`firebase push init failed: ${error.message || error}`);
+  }
+}
+
+function captureServerException(error, context = {}) {
+  if (!error) return;
+  const payload = {
+    source: "server",
+    ...context,
+  };
+  try {
+    if (SENTRY_DSN) {
+      Sentry.captureException(error, {
+        extra: payload,
+      });
+    }
+  } catch (_) {
+    // Ignore telemetry failures.
+  }
+  recordTelemetryEvent({
+    level: "error",
+    category: "server",
+    message: error.message || String(error),
+    context: payload,
+    stack: error.stack || null,
+  });
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -132,6 +237,10 @@ function asString(value, fallback = "") {
 function asNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function limitFromQuery(value, fallback = 80, min = 1, max = 500) {
+  return Math.max(min, Math.min(max, Math.trunc(asNumber(value, fallback))));
 }
 
 function ensureParentDirectory(filePath) {
@@ -163,6 +272,27 @@ function writeJsonStoreAtomic(filePath, data) {
   } catch (error) {
     console.log(`json-store save failed (${path.basename(filePath)}): ${error.message || error}`);
   }
+}
+
+function loadCollectionRecords({ collection, filePath }) {
+  try {
+    const fromDb = stateDatabase.loadCollection(collection);
+    if (Array.isArray(fromDb) && fromDb.length) {
+      return fromDb;
+    }
+  } catch (error) {
+    console.log(`sqlite load failed (${collection}): ${error.message || error}`);
+  }
+  return readJsonArrayStore(filePath);
+}
+
+function persistCollectionRecords({ collection, filePath, records, resolveId }) {
+  try {
+    stateDatabase.replaceCollection(collection, records, resolveId);
+  } catch (error) {
+    console.log(`sqlite save failed (${collection}): ${error.message || error}`);
+  }
+  writeJsonStoreAtomic(filePath, records);
 }
 
 function sanitizeOptionalLocation(raw) {
@@ -960,7 +1090,10 @@ function listDriverAccessProfiles() {
 
 function loadDriverAccessProfiles() {
   try {
-    const decoded = readJsonArrayStore(ACCESS_STORE_PATH);
+    const decoded = loadCollectionRecords({
+      collection: COLLECTION_ACCESS,
+      filePath: ACCESS_STORE_PATH,
+    });
     if (!Array.isArray(decoded)) return;
     driverAccessProfiles.clear();
     decoded.forEach((item) => {
@@ -976,7 +1109,12 @@ function loadDriverAccessProfiles() {
 
 function persistDriverAccessProfiles() {
   try {
-    writeJsonStoreAtomic(ACCESS_STORE_PATH, listDriverAccessProfiles());
+    persistCollectionRecords({
+      collection: COLLECTION_ACCESS,
+      filePath: ACCESS_STORE_PATH,
+      records: listDriverAccessProfiles(),
+      resolveId: (record) => record.id,
+    });
   } catch (error) {
     console.log(`access-store save failed: ${error.message || error}`);
   }
@@ -1127,7 +1265,7 @@ function recoverDriverAccessProfilesFromAccounts() {
 function recoverDriverAccessProfilesFromAdminBackups() {
   let changed = false;
   for (const record of accountProfiles.values()) {
-    if (!record || asString(record.role, "driver") !== "admin") continue;
+    if (!record || asString(record.role, "admin") !== "admin") continue;
     const backup = Array.isArray(record.authorizedDriversBackup)
       ? record.authorizedDriversBackup
       : [];
@@ -1152,7 +1290,10 @@ function recoverDriverAccessProfilesFromAdminBackups() {
 
 function loadAccountProfiles() {
   try {
-    const decoded = readJsonArrayStore(ACCOUNT_STORE_PATH);
+    const decoded = loadCollectionRecords({
+      collection: COLLECTION_ACCOUNTS,
+      filePath: ACCOUNT_STORE_PATH,
+    });
     if (!Array.isArray(decoded)) return;
     accountProfiles.clear();
     decoded.forEach((item) => {
@@ -1168,7 +1309,12 @@ function loadAccountProfiles() {
 
 function persistAccountProfiles() {
   try {
-    writeJsonStoreAtomic(ACCOUNT_STORE_PATH, Array.from(accountProfiles.values()));
+    persistCollectionRecords({
+      collection: COLLECTION_ACCOUNTS,
+      filePath: ACCOUNT_STORE_PATH,
+      records: Array.from(accountProfiles.values()),
+      resolveId: (record) => record.accountKey,
+    });
   } catch (error) {
     console.log(`account-store save failed: ${error.message || error}`);
   }
@@ -1218,7 +1364,10 @@ function listTrips() {
 }
 
 function loadPersistedTrips() {
-  const decoded = readJsonArrayStore(TRIP_STORE_PATH);
+  const decoded = loadCollectionRecords({
+    collection: COLLECTION_TRIPS,
+    filePath: TRIP_STORE_PATH,
+  });
   trips.clear();
   decoded.forEach((item) => {
     const trip = sanitizeTripRecord(item);
@@ -1228,7 +1377,12 @@ function loadPersistedTrips() {
 }
 
 function persistTrips() {
-  writeJsonStoreAtomic(TRIP_STORE_PATH, listTrips());
+  persistCollectionRecords({
+    collection: COLLECTION_TRIPS,
+    filePath: TRIP_STORE_PATH,
+    records: listTrips(),
+    resolveId: (record) => record.id,
+  });
 }
 
 function sanitizeAuditEvent(record) {
@@ -1248,13 +1402,21 @@ function sanitizeAuditEvent(record) {
 
 function loadAuditEvents() {
   auditEvents.length = 0;
-  readJsonArrayStore(AUDIT_STORE_PATH)
+  loadCollectionRecords({
+    collection: COLLECTION_AUDIT,
+    filePath: AUDIT_STORE_PATH,
+  })
     .slice(0, MAX_AUDIT_EVENTS)
     .forEach((item) => auditEvents.push(sanitizeAuditEvent(item)));
 }
 
 function persistAuditEvents() {
-  writeJsonStoreAtomic(AUDIT_STORE_PATH, auditEvents.slice(0, MAX_AUDIT_EVENTS));
+  persistCollectionRecords({
+    collection: COLLECTION_AUDIT,
+    filePath: AUDIT_STORE_PATH,
+    records: auditEvents.slice(0, MAX_AUDIT_EVENTS),
+    resolveId: (record) => record.id,
+  });
 }
 
 function recordAuditEvent({
@@ -1302,7 +1464,10 @@ function sanitizeOperationalNotification(record) {
 
 function loadOperationalNotifications() {
   operationalNotifications.length = 0;
-  readJsonArrayStore(NOTIFICATION_STORE_PATH)
+  loadCollectionRecords({
+    collection: COLLECTION_NOTIFICATIONS,
+    filePath: NOTIFICATION_STORE_PATH,
+  })
     .slice(0, MAX_OPERATIONAL_NOTIFICATIONS)
     .forEach((item) =>
       operationalNotifications.push(sanitizeOperationalNotification(item)),
@@ -1310,10 +1475,12 @@ function loadOperationalNotifications() {
 }
 
 function persistOperationalNotifications() {
-  writeJsonStoreAtomic(
-    NOTIFICATION_STORE_PATH,
-    operationalNotifications.slice(0, MAX_OPERATIONAL_NOTIFICATIONS),
-  );
+  persistCollectionRecords({
+    collection: COLLECTION_NOTIFICATIONS,
+    filePath: NOTIFICATION_STORE_PATH,
+    records: operationalNotifications.slice(0, MAX_OPERATIONAL_NOTIFICATIONS),
+    resolveId: (record) => record.id,
+  });
 }
 
 function pushOperationalNotification({
@@ -1343,6 +1510,247 @@ function pushOperationalNotification({
   persistOperationalNotifications();
   io.emit("ops:notification", notification);
   return notification;
+}
+
+function sanitizeSupportTicket(record) {
+  const safe = record && typeof record === "object" ? record : {};
+  const messages = Array.isArray(safe.messages)
+    ? safe.messages
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          id: asString(item.id, crypto.randomBytes(8).toString("hex")),
+          authorRole: asString(item.authorRole, "driver"),
+          authorName: asString(item.authorName, "AtoB"),
+          message: asString(item.message),
+          createdAt: asString(item.createdAt, nowIso()),
+        }))
+    : [];
+  return {
+    id: asString(safe.id, crypto.randomBytes(10).toString("hex")),
+    accountKey: asString(safe.accountKey),
+    role: asString(safe.role, "driver"),
+    title: asString(safe.title, "Soporte"),
+    description: asString(safe.description),
+    category: asString(safe.category, "general"),
+    priority: asString(safe.priority, "normal"),
+    status: asString(safe.status, "open"),
+    createdAt: asString(safe.createdAt, nowIso()),
+    updatedAt: asString(safe.updatedAt, nowIso()),
+    assignedTo: asString(safe.assignedTo, null),
+    userName: asString(safe.userName),
+    userEmail: normalizeEmail(safe.userEmail),
+    metadata:
+      safe.metadata && typeof safe.metadata === "object" ? safe.metadata : {},
+    messages,
+  };
+}
+
+function listSupportTickets() {
+  return supportTickets
+    .map((ticket) => sanitizeSupportTicket(ticket))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+function loadSupportTickets() {
+  supportTickets.length = 0;
+  loadCollectionRecords({
+    collection: COLLECTION_SUPPORT,
+    filePath: SUPPORT_STORE_PATH,
+  })
+    .slice(0, MAX_SUPPORT_TICKETS)
+    .forEach((item) => supportTickets.push(sanitizeSupportTicket(item)));
+}
+
+function persistSupportTickets() {
+  persistCollectionRecords({
+    collection: COLLECTION_SUPPORT,
+    filePath: SUPPORT_STORE_PATH,
+    records: listSupportTickets().slice(0, MAX_SUPPORT_TICKETS),
+    resolveId: (record) => record.id,
+  });
+}
+
+function upsertSupportTicket(record) {
+  const ticket = sanitizeSupportTicket(record);
+  const index = supportTickets.findIndex((item) => item.id === ticket.id);
+  if (index >= 0) {
+    supportTickets[index] = ticket;
+  } else {
+    supportTickets.unshift(ticket);
+    if (supportTickets.length > MAX_SUPPORT_TICKETS) {
+      supportTickets.length = MAX_SUPPORT_TICKETS;
+    }
+  }
+  persistSupportTickets();
+  io.emit("support:ticket", ticket);
+  return ticket;
+}
+
+function sanitizeTelemetryEvent(record) {
+  const safe = record && typeof record === "object" ? record : {};
+  return {
+    id: asString(safe.id, crypto.randomBytes(10).toString("hex")),
+    level: asString(safe.level, "info"),
+    category: asString(safe.category, "client"),
+    message: asString(safe.message),
+    accountKey: asString(safe.accountKey, null),
+    role: asString(safe.role, null),
+    platform: asString(safe.platform, null),
+    build: asString(safe.build, null),
+    createdAt: asString(safe.createdAt, nowIso()),
+    context:
+      safe.context && typeof safe.context === "object" ? safe.context : {},
+    stack: asString(safe.stack, null),
+  };
+}
+
+function loadTelemetryEvents() {
+  telemetryEvents.length = 0;
+  loadCollectionRecords({
+    collection: COLLECTION_TELEMETRY,
+    filePath: TELEMETRY_STORE_PATH,
+  })
+    .slice(0, MAX_TELEMETRY_EVENTS)
+    .forEach((item) => telemetryEvents.push(sanitizeTelemetryEvent(item)));
+}
+
+function persistTelemetryEvents() {
+  persistCollectionRecords({
+    collection: COLLECTION_TELEMETRY,
+    filePath: TELEMETRY_STORE_PATH,
+    records: telemetryEvents.slice(0, MAX_TELEMETRY_EVENTS),
+    resolveId: (record) => record.id,
+  });
+}
+
+function recordTelemetryEvent(record) {
+  const event = sanitizeTelemetryEvent({
+    ...record,
+    id: asString(record?.id, crypto.randomBytes(10).toString("hex")),
+    createdAt: asString(record?.createdAt, nowIso()),
+  });
+  telemetryEvents.unshift(event);
+  if (telemetryEvents.length > MAX_TELEMETRY_EVENTS) {
+    telemetryEvents.length = MAX_TELEMETRY_EVENTS;
+  }
+  persistTelemetryEvents();
+  io.emit("ops:telemetry", event);
+  return event;
+}
+
+function sanitizePushDevice(record) {
+  const safe = record && typeof record === "object" ? record : {};
+  return {
+    token: asString(safe.token),
+    accountKey: asString(safe.accountKey),
+    role: asString(safe.role, "driver"),
+    platform: asString(safe.platform, "unknown"),
+    deviceId: asString(safe.deviceId, null),
+    enabled: safe.enabled !== false,
+    createdAt: asString(safe.createdAt, nowIso()),
+    updatedAt: asString(safe.updatedAt, nowIso()),
+  };
+}
+
+function loadPushDeviceRegistrations() {
+  pushDeviceRegistrations.clear();
+  loadCollectionRecords({
+    collection: COLLECTION_PUSH_DEVICES,
+    filePath: PUSH_DEVICE_STORE_PATH,
+  }).forEach((item) => {
+    const registration = sanitizePushDevice(item);
+    if (!registration.token) return;
+    pushDeviceRegistrations.set(registration.token, registration);
+  });
+}
+
+function persistPushDeviceRegistrations() {
+  persistCollectionRecords({
+    collection: COLLECTION_PUSH_DEVICES,
+    filePath: PUSH_DEVICE_STORE_PATH,
+    records: Array.from(pushDeviceRegistrations.values()),
+    resolveId: (record) => record.token,
+  });
+}
+
+function hasPushTransportConfig() {
+  return firebaseReady;
+}
+
+async function sendPushNotification({
+  title,
+  body,
+  data = {},
+  targetAccountKey,
+  targetRole,
+}) {
+  const registrations = Array.from(pushDeviceRegistrations.values()).filter(
+    (item) =>
+      item.enabled !== false &&
+      item.token &&
+      ((!targetAccountKey || item.accountKey === targetAccountKey) &&
+        (!targetRole || item.role === targetRole)),
+  );
+  const tokens = registrations.map((item) => item.token).filter(Boolean);
+  if (!tokens.length || !firebaseReady) {
+    return {
+      ok: false,
+      sent: 0,
+      skipped: true,
+      configured: firebaseReady,
+    };
+  }
+  try {
+    const response = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title,
+        body,
+      },
+      data: Object.fromEntries(
+        Object.entries(data || {}).map(([key, value]) => [key, asString(value)]),
+      ),
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "atob_dispatch_high",
+          priority: "high",
+          sound: "default",
+        },
+      },
+      apns: {
+        headers: {
+          "apns-priority": "10",
+        },
+        payload: {
+          aps: {
+            sound: "default",
+            contentAvailable: true,
+          },
+        },
+      },
+    });
+    return {
+      ok: true,
+      sent: response.successCount,
+      failed: response.failureCount,
+      configured: true,
+    };
+  } catch (error) {
+    captureServerException(error, {
+      scope: "push",
+      title,
+      targetAccountKey,
+      targetRole,
+    });
+    return {
+      ok: false,
+      sent: 0,
+      failed: tokens.length,
+      configured: true,
+      message: error.message || String(error),
+    };
+  }
 }
 
 function buildDriverPerformance(limit = 6) {
@@ -1416,14 +1824,20 @@ function buildOperationsSummary() {
       completedTrips,
       auditEvents: auditEvents.length,
       notifications: operationalNotifications.length,
+      supportTickets: supportTickets.length,
+      telemetryEvents: telemetryEvents.length,
     },
     system: {
       persistenceMode: PERSISTENCE_MODE,
       persistenceRoot: PERSISTENCE_ROOT,
+      databasePath: SQLITE_DB_PATH,
+      databaseReady: Boolean(SQLITE_DB_PATH),
       renderRuntime,
       persistentDisk,
       inviteEmailConfigured: hasInviteEmailConfig(),
       liveKitConfigured: hasLiveKitConfig(),
+      pushConfigured: hasPushTransportConfig(),
+      sentryConfigured: Boolean(SENTRY_DSN),
       warning:
         renderRuntime && !persistentDisk
           ? "Render puede reiniciar filesystem efimero; para salida a mercado conviene disco persistente o base de datos externa."
@@ -1432,6 +1846,8 @@ function buildOperationsSummary() {
     recentTrips: tripList.slice(0, 8),
     recentAudit: auditEvents.slice(0, 12),
     recentNotifications: operationalNotifications.slice(0, 12),
+    recentSupport: listSupportTickets().slice(0, 12),
+    recentTelemetry: telemetryEvents.slice(0, 12),
     driverPerformance: buildDriverPerformance(),
   };
 }
@@ -1442,7 +1858,7 @@ function ensureFixedAdminAccountProfile() {
     accountKey,
     role: "admin",
   });
-  const next = sanitizeAccountProfile({
+  let next = sanitizeAccountProfile({
     ...current,
     accountKey,
     role: "admin",
@@ -1788,6 +2204,18 @@ function handleTripAssignment(raw) {
       status: trip.status,
     },
   });
+  Promise.resolve(
+    sendPushNotification({
+      title: "Nueva ruta asignada",
+      body: `${trip.origin} -> ${trip.destination}`,
+      data: {
+        kind: "trip_assigned",
+        tripId: trip.id,
+        status: trip.status,
+      },
+      targetRole: "driver",
+    }),
+  ).catch(() => {});
 }
 
 function handleTripDecision(raw, status) {
@@ -1865,6 +2293,18 @@ function handleTripDecision(raw, status) {
       status,
     },
   });
+  Promise.resolve(
+    sendPushNotification({
+      title: titleByStatus[status] || "Actualizacion de viaje",
+      body: `${next.origin} -> ${next.destination}`,
+      data: {
+        kind: `trip_${status}`,
+        tripId: next.id,
+        status,
+      },
+      targetRole: "driver",
+    }),
+  ).catch(() => {});
 }
 
 function handleTripUpdate(raw) {
@@ -2070,6 +2510,12 @@ loadAuditEvents();
 persistAuditEvents();
 loadOperationalNotifications();
 persistOperationalNotifications();
+loadSupportTickets();
+persistSupportTickets();
+loadTelemetryEvents();
+persistTelemetryEvents();
+loadPushDeviceRegistrations();
+persistPushDeviceRegistrations();
 
 io.on("connection", (socket) => {
   console.log(`client connected: ${socket.id}`);
@@ -2089,12 +2535,12 @@ io.on("connection", (socket) => {
   });
 
   socket.on("drivers:request", () => {
-    socket.emit("drivers:list", Array.from(drivers.values()));
+    socket.emit("drivers:list", listConnectedDriversUnique());
   });
 
   // Backward compatibility with older clients.
   socket.on("drivers:list", () => {
-    socket.emit("drivers:list", Array.from(drivers.values()));
+    socket.emit("drivers:list", listConnectedDriversUnique());
   });
 
   socket.on("driver:location:update", (data) => {
@@ -2232,6 +2678,216 @@ app.get("/operations/notifications", (req, res) => {
     ok: true,
     notifications: source.slice(0, limit),
   });
+});
+
+app.get("/support/tickets", (req, res) => {
+  const limit = Math.max(1, Math.trunc(asNumber(req.query.limit, 120)));
+  const accountKey = asString(req.query.accountKey);
+  const role = asString(req.query.role);
+  const status = asString(req.query.status);
+  let source = listSupportTickets();
+  if (accountKey) {
+    source = source.filter((ticket) => ticket.accountKey === accountKey);
+  }
+  if (role) {
+    source = source.filter((ticket) => ticket.role === role);
+  }
+  if (status) {
+    source = source.filter((ticket) => ticket.status === status);
+  }
+  res.status(200).json({
+    ok: true,
+    tickets: source.slice(0, limit),
+  });
+});
+
+app.post("/support/tickets", async (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const accountKey = asString(payload.accountKey);
+  const role = asString(payload.role, "driver");
+  const title = asString(payload.title);
+  const description = asString(payload.description);
+  if (!accountKey || !title || !description) {
+    res.status(400).json({
+      ok: false,
+      message: "accountKey, title y description son obligatorios",
+    });
+    return;
+  }
+  const existing = asString(payload.id)
+    ? supportTickets.find((item) => item.id === asString(payload.id))
+    : null;
+  const next = upsertSupportTicket({
+    ...(existing || {}),
+    ...payload,
+    id: asString(payload.id, existing?.id || crypto.randomBytes(10).toString("hex")),
+    accountKey,
+    role,
+    title,
+    description,
+    updatedAt: nowIso(),
+    createdAt: existing?.createdAt || nowIso(),
+    messages: [
+      ...(Array.isArray(existing?.messages) ? existing.messages : []),
+      ...(Array.isArray(payload.messages) ? payload.messages : []),
+    ],
+  });
+  recordAuditEvent({
+    type: existing ? "support_ticket_updated" : "support_ticket_created",
+    scope: "support",
+    title: existing ? "Ticket actualizado" : "Ticket creado",
+    message: `${next.title} (${next.accountKey})`,
+    metadata: {
+      ticketId: next.id,
+      accountKey,
+      role,
+      status: next.status,
+    },
+  });
+  pushOperationalNotification({
+    kind: existing ? "support_ticket_updated" : "support_ticket_created",
+    title: existing ? "Soporte actualizado" : "Nuevo ticket de soporte",
+    message: `${next.title} - ${next.userName || next.accountKey}`,
+    targetRole: "admin",
+    metadata: {
+      ticketId: next.id,
+      accountKey,
+      role,
+      status: next.status,
+    },
+  });
+  await sendPushNotification({
+    title: existing ? "Soporte actualizado" : "Soporte recibido",
+    body: next.title,
+    data: {
+      kind: "support_ticket",
+      ticketId: next.id,
+      status: next.status,
+    },
+    targetRole: "admin",
+  });
+  res.status(200).json({
+    ok: true,
+    ticket: next,
+    tickets: listSupportTickets().slice(0, limitFromQuery(req.query.limit, 120)),
+  });
+});
+
+app.patch("/support/tickets/:id", async (req, res) => {
+  const ticketId = asString(req.params.id);
+  const current = supportTickets.find((item) => item.id === ticketId);
+  if (!ticketId || !current) {
+    res.status(404).json({
+      ok: false,
+      message: "Ticket no encontrado",
+    });
+    return;
+  }
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const next = upsertSupportTicket({
+    ...current,
+    ...payload,
+    id: current.id,
+    updatedAt: nowIso(),
+    messages: [
+      ...(Array.isArray(current.messages) ? current.messages : []),
+      ...(Array.isArray(payload.messages) ? payload.messages : []),
+    ],
+  });
+  recordAuditEvent({
+    type: "support_ticket_status_changed",
+    scope: "support",
+    title: "Ticket actualizado",
+    message: `${next.title} => ${next.status}`,
+    metadata: {
+      ticketId: next.id,
+      accountKey: next.accountKey,
+      status: next.status,
+    },
+  });
+  await sendPushNotification({
+    title: "Soporte actualizado",
+    body: `${next.title} (${next.status})`,
+    data: {
+      kind: "support_ticket_update",
+      ticketId: next.id,
+      status: next.status,
+    },
+    targetAccountKey: next.accountKey,
+  });
+  res.status(200).json({
+    ok: true,
+    ticket: next,
+  });
+});
+
+app.get("/telemetry/events", (req, res) => {
+  const limit = Math.max(1, Math.trunc(asNumber(req.query.limit, 120)));
+  const level = asString(req.query.level);
+  let source = telemetryEvents;
+  if (level) {
+    source = source.filter((item) => item.level === level);
+  }
+  res.status(200).json({
+    ok: true,
+    events: source.slice(0, limit),
+  });
+});
+
+app.post("/telemetry/events", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const event = recordTelemetryEvent(payload);
+  if (event.level === "error") {
+    recordAuditEvent({
+      type: "client_error_report",
+      scope: "telemetry",
+      title: "Error cliente reportado",
+      message: event.message,
+      severity: "warning",
+      metadata: {
+        accountKey: event.accountKey,
+        platform: event.platform,
+        category: event.category,
+      },
+    });
+  }
+  res.status(200).json({
+    ok: true,
+    event,
+  });
+});
+
+app.post("/devices/push/register", (req, res) => {
+  const payload = req.body && typeof req.body === "object" ? req.body : {};
+  const registration = sanitizePushDevice(payload);
+  if (!registration.token || !registration.accountKey) {
+    res.status(400).json({
+      ok: false,
+      message: "token y accountKey son obligatorios",
+    });
+    return;
+  }
+  pushDeviceRegistrations.set(registration.token, registration);
+  persistPushDeviceRegistrations();
+  res.status(200).json({
+    ok: true,
+    device: registration,
+    pushConfigured: hasPushTransportConfig(),
+  });
+});
+
+app.post("/devices/push/unregister", (req, res) => {
+  const token = asString(req.body?.token);
+  if (!token) {
+    res.status(400).json({
+      ok: false,
+      message: "token es obligatorio",
+    });
+    return;
+  }
+  pushDeviceRegistrations.delete(token);
+  persistPushDeviceRegistrations();
+  res.status(200).json({ ok: true });
 });
 
 app.get("/access/drivers", (_, res) => {
@@ -3064,6 +3720,78 @@ app.post("/accounts/profile/upsert", (req, res) => {
   accountProfiles.set(accountKey, next);
   persistAccountProfiles();
   if (role === "driver") {
+    const incomingSnapshot =
+      payload.driverAccessSnapshot && typeof payload.driverAccessSnapshot === "object"
+        ? sanitizeDriverAccess(payload.driverAccessSnapshot)
+        : (
+            next.driverAccessSnapshot &&
+            typeof next.driverAccessSnapshot === "object"
+          )
+            ? sanitizeDriverAccess(next.driverAccessSnapshot)
+            : null;
+    if (
+      incomingSnapshot &&
+      incomingSnapshot.id &&
+      incomingSnapshot.email &&
+      incomingSnapshot.accessCode
+    ) {
+      let existingId = null;
+      for (const [profileId, profile] of driverAccessProfiles.entries()) {
+        if (
+          profileId === incomingSnapshot.id ||
+          normalizeEmail(profile.email) === normalizeEmail(incomingSnapshot.email)
+        ) {
+          existingId = profileId;
+          break;
+        }
+      }
+      const currentAccess = existingId ? driverAccessProfiles.get(existingId) : null;
+      const mergedAccess = sanitizeDriverAccess({
+        ...incomingSnapshot,
+        ...currentAccess,
+        id: existingId || incomingSnapshot.id,
+        displayName: asString(next.user?.legalName, incomingSnapshot.displayName),
+        email: normalizeEmail(next.user?.email || currentAccess?.email || incomingSnapshot.email),
+        phoneNumber: asString(
+          next.user?.phoneNumber,
+          currentAccess?.phoneNumber || incomingSnapshot.phoneNumber || null,
+        ),
+        governmentId: asString(
+          next.user?.governmentId,
+          currentAccess?.governmentId || incomingSnapshot.governmentId || null,
+        ),
+        accessCode: asString(currentAccess?.accessCode, incomingSnapshot.accessCode),
+        accessCodeTail: asString(
+          currentAccess?.accessCodeTail,
+          incomingSnapshot.accessCodeTail,
+        ),
+        isActive: currentAccess?.isActive !== false && incomingSnapshot.isActive !== false,
+        isActivated:
+          currentAccess?.isActivated === true || incomingSnapshot.isActivated === true,
+        activationTokenHash: asString(
+          currentAccess?.activationTokenHash,
+          incomingSnapshot.activationTokenHash,
+        ),
+        activationSentAt: asString(
+          currentAccess?.activationSentAt,
+          incomingSnapshot.activationSentAt,
+        ),
+        activatedAt: asString(currentAccess?.activatedAt, incomingSnapshot.activatedAt),
+        welcomeSentAt: asString(
+          currentAccess?.welcomeSentAt,
+          incomingSnapshot.welcomeSentAt,
+        ),
+        createdAt: asString(currentAccess?.createdAt, incomingSnapshot.createdAt || nowIso()),
+      });
+      driverAccessProfiles.set(mergedAccess.id, mergedAccess);
+      persistDriverAccessProfiles();
+      next = sanitizeAccountProfile({
+        ...next,
+        driverAccessSnapshot: mergedAccess,
+      });
+      accountProfiles.set(accountKey, next);
+      persistAccountProfiles();
+    }
     recordAuditEvent({
       type: "driver_profile_updated",
       scope: "account",
@@ -3212,6 +3940,20 @@ app.get("/livekit/token", async (req, res) => {
       message: `No se pudo generar token LiveKit: ${error.message || error}`,
     });
   }
+});
+
+process.on("unhandledRejection", (error) => {
+  captureServerException(error instanceof Error ? error : new Error(String(error)), {
+    scope: "process",
+    type: "unhandledRejection",
+  });
+});
+
+process.on("uncaughtException", (error) => {
+  captureServerException(error, {
+    scope: "process",
+    type: "uncaughtException",
+  });
 });
 
 const port = Number(process.env.PORT || 3000);
